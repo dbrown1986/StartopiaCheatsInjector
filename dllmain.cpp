@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstdlib>
+#include <cstring>
 #include <queue>
 #include <mutex>
 #include "MinHook.h"
@@ -39,7 +40,11 @@ const DWORD OFFSET_SPAWN_PEEP_MP = 0x0022E3D0; // FUN_0062e3d0 (Multiplayer/Alt 
 const DWORD OFFSET_SPAWN_PORTABLE = 0x0018F9D0; // FUN_0058f9d0 (Portable/Crate Spawner)
 const DWORD OFFSET_GET_PLAYER_SECTOR = 0x0023C680; // FUN_0063c680 (Gets player's station sector)
 const DWORD OFFSET_PACK_COORDS = 0x00061280; // FUN_00461280 (Packs X, Z, Deck into tile ID)
+const DWORD OFFSET_GET_ENTITY_OWNER = 0x00212BB0; // FUN_00612bb0 (Returns entity's owning pPlayer)
+const DWORD OFFSET_ITER_INIT = 0x001CA630; // FUN_005ca630 (Native Entity Iterator Init)
+const DWORD OFFSET_ITER_NEXT = 0x001CB510; // FUN_005cb510 (Native Entity Iterator Next -> pEntity)
 const DWORD OFFSET_SPECIES_TABLE = 0x004D9AF8; // DAT_008d9af8 (Loaded Peep definitions)
+const DWORD OFFSET_ENTITY_TABLE = 0x006A306C; // DAT_00aa306c (Global Entity Slot Array)
 const DWORD OFFSET_FLAG_MP_MODE = 0x007FE1AC; // DAT_00bfe1ac
 const DWORD OFFSET_PLAYER_PTR = 0x007F5170; // DAT_00bf5170
 
@@ -52,33 +57,130 @@ HWND    g_tabHwnd = nullptr;
 HFONT   g_uiFont = nullptr;
 
 // ==============================================================================
-// Verified Crate & Peep Catalogs
+// Verified Crate, Room Hard-Plan, Furniture Plan & Peep Catalogs (Alphabetical)
 // ==============================================================================
+struct SubTypeEntry {
+    unsigned int id;
+    const char* label;
+};
+
+static const SubTypeEntry g_roomPlanCatalog[] = {
+    { 5,  "Berth" },
+    { 41, "Bio-Deck Fountain" },
+    { 10, "Cargo Bay" },
+    { 35, "Casino" },
+    { 33, "Cocktail Bar" },
+    { 4,  "Collector Node" },
+    { 30, "Combat Store" },
+    { 27, "Computer Shop" },
+    { 14, "Comsensor" },
+    { 28, "Curiosity Shop" },
+    { 13, "Dine-O-Mat" },
+    { 16, "Disco" },
+    { 1,  "Docking Port" },
+    { 3,  "Energy Collector" },
+    { 11, "Factory" },
+    { 17, "Fighting Pit [!]" },
+    { 31, "General Store" },
+    { 18, "Holodeck" },
+    { 7,  "Laboratory" },
+    { 24, "Lavotron" },
+    { 29, "Leisure Store" },
+    { 37, "Lockdown Brig" },
+    { 39, "Love Nest" },
+    { 26, "Music Shop" },
+    { 19, "Orophux" },
+    // { 2,  "Lift (RT_LIFT)" }, (DO NOT SPAWN)
+    { 23, "Palace Galactica" },
+    { 12, "Recharger" },
+    { 34, "Recreational Bar" },
+    { 9,  "Recycler" },
+    { 32, "Rough Bar" },
+    { 38, "Security Column" },
+    { 15, "Security Control" },
+    { 6,  "Sick Bay" },
+    { 25, "Slugpartments" },
+    { 22, "Space Inn" },
+    { 21, "Star Motel" },
+    { 8,  "Stardock" },
+    { 36, "Viewing Gallery" },
+    { 40, "Zedem Temple (Biodeck Only)" },
+    { 20, "Zero-G Gyro [!]" },
+};
+static const int ROOM_PLAN_COUNT = sizeof(g_roomPlanCatalog) / sizeof(g_roomPlanCatalog[0]);
+
+static const SubTypeEntry g_furniturePlanCatalog[] = {
+    { 24, "Art: Endeavour (FURN_ART_ENDEAVOUR)" },
+    { 25, "Art: Furies (FURN_ART_FURIES)" },
+    { 18, "Art: Gnmerich (FURN_ART_GNMERICH)" },
+    { 19, "Art: Kategukhat (FURN_ART_KATEGUKHAT)" },
+    { 20, "Art: Legacy (FURN_ART_LEGACY)" },
+    { 21, "Art: Matter (FURN_ART_MATTER)" },
+    { 22, "Art: Mother (FURN_ART_MOTHER)" },
+    { 23, "Art: Planetscape (FURN_ART_PLANETSCAPE)" },
+    { 26, "Art: U-Planter (FURN_ART_UPLANTER)" },
+    { 38, "Beer Bar Counter (FURN_BEERBAR)" },
+    { 16, "Beer Bar Table (FURN_BEERBAR_TABLE)" },
+    { 28, "Brig Cell (FURN_CELL)" },
+    { 8,  "Bunk Bed (FURN_BUNK)" },
+    { 44, "Clock (FURN_CLOCK)" },
+    { 39, "Cocktail Bar Counter (FURN_COCKTAILBAR)" },
+    { 27, "Cocktail Bar Table (FURN_COCKTAILBAR_TABLE)" },
+    { 11, "Dispenser (FURN_DISPENSER)" },
+    { 9,  "Health Charts (FURN_HEALTH_CHARTS)" },
+    { 3,  "Lab Bench (FURN_LabBench)" },
+    { 43, "Lava Lamp (FURN_LAVALAMP)" },
+    { 17, "Litter Bin (FURN_LITTER_BIN)" },
+    { 36, "Love Bench (FURN_LOVE_BENCH)" },
+    { 35, "Love Chair (FURN_LOVE_CHAIR)" },
+    { 13, "Machine That Pings (FURN_MACHINE_THAT_PINGS)" },
+    { 12, "Medi-Bed (FURN_MEDI_BED)" },
+    { 4,  "Microscope (FURN_Microscope)" },
+    { 45, "Plant Pot (FURN_PLANTPOT)" },
+    { 29, "Plaza Bench (FURN_PLAZA_BENCH)" },
+    { 33, "Plaza Fountain (FURN_PLAZA_FOUNTAIN)" },
+    { 30, "Plaza Lamp (FURN_PLAZA_LAMP)" },
+    { 31, "Plaza Monk Statue (FURN_PLAZA_MONK)" },
+    { 34, "Plaza Monument (FURN_PLAZA_MONUMENT)" },
+    { 32, "Plaza Tower (FURN_PLAZA_TOWER)" },
+    { 1,  "Projector (FURN_Projector)" },
+    { 5,  "Replicator (FURN_Replicator)" },
+    { 37, "Rough Bar Counter (FURN_ROUGHBAR)" },
+    { 15, "Rough Bar Table (FURN_ROUGHBAR_TABLE)" },
+    { 40, "Slug Bar Counter (FURN_SLUGBAR)" },
+    { 41, "Slug Bar Table (FURN_SLUGBAR_TABLE)" },
+    { 42, "TeeVee (FURN_TEEVEE)" },
+    { 10, "Waiting Chair (FURN_WAITING_CHAIR)" },
+    { 2,  "Workstation (FURN_Workstation)" },
+    { 14, "X-Ray Machine (FURN_XRAY_MACHINE)" },
+};
+static const int FURN_PLAN_COUNT = sizeof(g_furniturePlanCatalog) / sizeof(g_furniturePlanCatalog[0]);
+
 struct CrateCatalogEntry {
     unsigned int id;
     const char* label;
-    bool requiresExtra;
-    unsigned int defaultExtra;
+    int subTypeMode;   // 0 = Standard Crate, 1 = Tech (1..45), 2 = Scutter/Peep, 3 = Room Plan, 4 = Furniture Plan
+    bool canMaintain;  // True for standard crates; false for Tech/Hardplan/Furniture/Scutter
 };
 
 static const CrateCatalogEntry g_crateCatalog[] = {
-    { 1,  "01 - CT_INDUSTRIAL (Industrial Crate)",           false, 0 },
-    { 2,  "02 - CT_MEDICAL_SUPPLY (Medical Supplies)",       false, 0 },
-    { 3,  "03 - CT_FOOD_SUPPLY (Food Crate)",                false, 0 },
-    { 4,  "04 - CT_HARDWARE (Hardware Crate)",               false, 0 },
-    { 5,  "05 - CT_TECHNOLOGY (Tech Crate [Extra >= 1])",    true,  1 },
-    { 6,  "06 - CT_LUXURY_ITEM (Luxury Goods)",              false, 0 },
-    { 7,  "07 - CT_ORE (Ore Crate)",                         false, 0 },
-    { 8,  "08 - CT_BLACK_MARKET_GOODS (Black Market)",       false, 0 },
-    { 9,  "09 - CT_BOMB (Explosive / Bomb)",                 false, 0 },
-    { 10, "10 - CT_ALIEN_ARTIFACT (Alien Artifact)",         false, 0 },
-    { 11, "11 - CT_JUNK (Junk [Flag=0])",                    false, 0 },
-    { 12, "12 - CT_LITTER (Litter [Flag=0])",                false, 0 },
-    { 13, "13 - CT_TURDITE (Turdite)",                       false, 0 },
-    { 14, "14 - CT_SCUTTER (Droid/Peep Crate [Extra 1..22])", true, 1 },
-    { 15, "15 - CT_HARDPLAN (Room Flat-Pack [Extra 1..41])",  true, 1 },
-    { 16, "16 - CT_FURNITUREPLAN (Furniture [Extra 1..45])",  true, 1 },
-    { 17, "17 - CT_DAMAGED_GOODS (Damaged Goods)",           false, 0 }
+    { 10, "Alien Artifact",         0, true  },
+    { 8,  "Black Market Supplies",  0, true  },
+    { 9,  "BOMB!",                  0, true  },
+    { 17, "Damaged Goods",          0, true  },
+    { 14, "Droid Crate",            2, false },
+    { 3,  "Food Crate",             0, true  },
+    { 16, "Furniture Crate",        4, false },
+    { 15, "Hardplan Crate",         3, false },
+    { 4,  "Hardware Crate",         0, true  },
+    { 1,  "Industrial Crate",       0, true  },
+    { 11, "Junk",                   0, true  },
+    { 12, "Litter",                 0, true  },
+    { 6,  "Luxury Goods",           0, true  },
+    { 2,  "Medical Supplies",       0, true  },
+    { 7,  "Ore Crate",              0, true  },
+    { 5,  "Technology Crate",       1, false },
+    { 13, "Turdite",                0, true  },
 };
 static const int CRATE_CATALOG_COUNT = sizeof(g_crateCatalog) / sizeof(g_crateCatalog[0]);
 
@@ -89,27 +191,54 @@ struct PeepCatalogEntry {
 };
 
 static const PeepCatalogEntry g_peepCatalog[] = {
-    { 1,  "01 - Scutter Mk I (Maintenance Droid)", false },
-    { 2,  "02 - Wheel Scutter Mk II",              false },
-    { 3,  "03 - Hover Scutter Mk III",             false },
-    { 4,  "04 - Police Scutter",                   false },
-    { 5,  "05 - Salt Hog",                         true  },
-    { 6,  "06 - Gray",                             true  },
-    { 7,  "07 - Kasvagorian",                      true  },
-    { 8,  "08 - Grekka Targ",                      true  },
-    { 9,  "09 - Karmarama",                        true  },
-    { 10, "10 - Zedem Monk",                       true  },
-    { 11, "11 - Turakken",                         true  },
-    { 12, "12 - Dahanese Siren (Female)",          true  },
-    { 13, "13 - Dahanese Siren (Male)",            true  },
-    { 14, "14 - Gem Slug",                         false },
-    { 15, "15 - Penitent",                         false },
-    { 19, "19 - Space Vermin",                     false },
-    { 20, "20 - Memau",                            false },
-    { 21, "21 - Skrasher",                         false },
-    { 22, "22 - Spy",                              false }
+    { 12, "Dahanese Siren (Female)",          true  },
+    { 13, "Dahanese Siren (Male)",            true  },
+    { 14, "Gem Slug",                         false },
+    { 6,  "Gray",                             true  },
+    { 8,  "Grekka Targ",                      true  },
+    { 9,  "Karmarama",                        true  },
+    { 7,  "Kasvagorian",                      true  },
+    { 20, "Memau",                            false },
+    { 15, "Penitent",                         false },
+    { 5,  "Salt Hog",                         true  },
+    { 1,  "Scutter Mk I (Maintenance Droid)", false },
+    { 2,  "Scutter Mk II (Wheel)",            false },
+    { 3,  "Scutter Mk III (Hover)",           false },
+    { 4,  "Security Scutter",                 false },
+    { 21, "Skrasher",                         false },
+    { 19, "Space Vermin",                     false },
+    { 22, "Spy",                              false },
+    { 11, "Turakken",                         true  },
+    { 10, "Zedem Monk",                       true  },
 };
 static const int PEEP_CATALOG_COUNT = sizeof(g_peepCatalog) / sizeof(g_peepCatalog[0]);
+
+// ==============================================================================
+// Auto-Maintain Rules State (Thread-Safe)
+// ==============================================================================
+struct PeepMaintainRule {
+    bool enabled;
+    int targetCount;
+    int localX;
+    int localY;
+    int deck;
+    bool resident;
+    unsigned char skill;
+    unsigned char dedication;
+    unsigned char loyalty;
+};
+
+struct CrateMaintainRule {
+    bool enabled;
+    int targetCount;
+    int localX;
+    int localY;
+    int deck;
+};
+
+PeepMaintainRule  g_peepMaintainRules[24]{};
+CrateMaintainRule g_crateMaintainRules[18]{};
+std::mutex        g_maintainMutex;
 
 // ==============================================================================
 // Native 72-Byte Peep Attribute Struct (Matches local_50..local_8 in FUN_006702a0)
@@ -205,6 +334,9 @@ LONG WINAPI GlobalVectoredCrashHandler(PEXCEPTION_POINTERS ep)
 typedef unsigned int(__fastcall* tScriptAddEnergy)(void* pPlayer, int amount);
 typedef int(__fastcall* tGetPlayerSector)(void* pPlayer, int unusedDeck);
 typedef unsigned int* (__thiscall* tPackCoords)(unsigned int* outPacked, char x, unsigned int z, unsigned int deck);
+typedef void* (__fastcall* tGetEntityOwner)(void* pEntity);
+typedef void(__fastcall* tIterInit)(void* pIterBuf, void* pPlayer, int entClass, int subType);
+typedef void* (__fastcall* tIterNext)(void* pIterBuf);
 typedef unsigned int(__fastcall* tSpawnPeepSP)(int mode, unsigned int* pPackedCoords, unsigned int peepType, unsigned short angle, void* pPlayer, void* pAttr);
 typedef void(__fastcall* tSpawnPeepMP)(int mode, unsigned int* pPackedCoords, int peepType, unsigned int angle, void* pPlayer, int* pAttr);
 typedef unsigned int(__fastcall* tSpawnPortable)(unsigned int* pPackedCoords, unsigned int cargoType, unsigned int angle, void* pPlayer, unsigned int extraData, int flag);
@@ -277,7 +409,7 @@ void ExecuteSpawnCrate(void* pPlayer, unsigned int cargoTypeId, unsigned int ext
     unsigned int packedCoord = GetSafePlayerTile(pPlayer, localX, localZ, deck);
     int flag = (cargoTypeId == 0xB || cargoTypeId == 0xC) ? 0 : 1;
 
-    LogMsg("[EXEC-CRATE] Spawning CargoID %u | Extra=%u | Tile=(%d, %d) Deck=%d | Packed=0x%08X\n",
+    LogMsg("[EXEC-CRATE] CargoID=%u | Extra=%u | Tile=(%d,%d) Deck=%d | Packed=0x%08X\n",
         cargoTypeId, extraData, localX, localZ, deck, packedCoord);
 
     unsigned int res = SpawnPortable(&packedCoord, cargoTypeId, 0, pPlayer, extraData, flag);
@@ -285,9 +417,117 @@ void ExecuteSpawnCrate(void* pPlayer, unsigned int cargoTypeId, unsigned int ext
 }
 
 // ==============================================================================
-// Subclassed Game Main-Thread WndProc + Timer
+// Native Entity Counter & Auto-Maintain Evaluator (Runs on Main Thread)
 // ==============================================================================
-#define GAME_QUEUE_TIMER_ID 0x5A70
+void EvaluateAutoMaintainRules(void* pPlayer)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_cmdMutex);
+        if (!g_cmdQueue.empty()) return;
+    }
+
+    auto GetEntityOwner = (tGetEntityOwner)(g_baseAddress + OFFSET_GET_ENTITY_OWNER);
+    DWORD* entitySlots = (DWORD*)(g_baseAddress + OFFSET_ENTITY_TABLE);
+
+    int liveResidentCounts[24]{};
+    int liveAnyPeepCounts[24]{};
+    int liveCrateCounts[18]{};
+
+    // Scan active entity table (DAT_00aa306c, 8 bytes per slot, indices 1..4095)
+    for (int idx = 1; idx < 4096; idx++) {
+        void* pEnt = (void*)entitySlots[idx * 2];
+        if (pEnt == nullptr) continue;
+
+        // Skip entities flagged as destroyed / dying / departing (bits 0x18 at +0x3E)
+        BYTE stateFlags = *(BYTE*)((BYTE*)pEnt + 0x3E);
+        if ((stateFlags & 0x18) != 0) continue;
+
+        // Only count entities owned by the local human player
+        if (GetEntityOwner(pEnt) != pPlayer) continue;
+
+        DWORD* vtable = *(DWORD**)pEnt;
+        if (vtable == nullptr) continue;
+
+        typedef int(__thiscall* tGetEntityClass)(void* self);
+        typedef int(__thiscall* tGetEntitySubType)(void* self);
+        int entClass = ((tGetEntityClass)vtable[0x18 / 4])(pEnt);
+
+        if (entClass == 1) {
+            // Peep / Droid
+            int speciesId = ((tGetEntitySubType)vtable[0x1C / 4])(pEnt);
+            if (speciesId >= 1 && speciesId <= 23) {
+                liveAnyPeepCounts[speciesId]++;
+
+                // Byte +0x30D on Peep struct: 0 = Hired Resident / Droid, non-zero = Visitor
+                BYTE visitorFlag = *(BYTE*)((BYTE*)pEnt + 0x30D);
+                bool isResident = (visitorFlag == 0) || (speciesId >= 1 && speciesId <= 4);
+                if (isResident) {
+                    liveResidentCounts[speciesId]++;
+                }
+            }
+        }
+        else if (entClass == 2) {
+            // Portable / Crate
+            int cargoId = ((tGetEntitySubType)vtable[0x1C / 4])(pEnt);
+            if (cargoId >= 1 && cargoId <= 17) {
+                liveCrateCounts[cargoId]++;
+            }
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(g_maintainMutex);
+
+    // Replenish any Peep species below target count (strictly comparing Residents vs Visitors)
+    for (int id = 1; id <= 22; id++) {
+        const auto& rule = g_peepMaintainRules[id];
+        if (!rule.enabled || rule.targetCount <= 0) continue;
+
+        int currentCount = rule.resident ? liveResidentCounts[id] : liveAnyPeepCounts[id];
+        if (currentCount < rule.targetCount) {
+            int deficit = rule.targetCount - currentCount;
+            if (deficit > 10) deficit = 10;
+            LogMsg("[AUTO-PEEP] ID %d %s count=%d < target=%d -> Spawning %d replacement(s)\n",
+                id, rule.resident ? "RESIDENT" : "VISITOR", currentCount, rule.targetCount, deficit);
+
+            for (int i = 0; i < deficit; i++) {
+                int sx = (rule.localX + (i % 5)) & 0x0F;
+                int sy = (rule.localY + (i / 5)) & 0x1F;
+                EnqueueCommand({
+                    CMD_SPAWN_PEEP, 0, (unsigned int)id, 0,
+                    sx, sy, rule.deck,
+                    rule.resident, rule.skill, rule.dedication, rule.loyalty
+                    });
+            }
+        }
+    }
+
+    // Replenish any Standard Crate below target count
+    for (int id = 1; id <= 17; id++) {
+        const auto& rule = g_crateMaintainRules[id];
+        if (rule.enabled && rule.targetCount > 0 && liveCrateCounts[id] < rule.targetCount) {
+            int deficit = rule.targetCount - liveCrateCounts[id];
+            if (deficit > 10) deficit = 10;
+            LogMsg("[AUTO-CRATE] CargoID %d count=%d < target=%d -> Spawning %d replacement(s)\n",
+                id, liveCrateCounts[id], rule.targetCount, deficit);
+
+            for (int i = 0; i < deficit; i++) {
+                int sx = (rule.localX + (i % 5)) & 0x0F;
+                int sy = (rule.localY + (i / 5)) & 0x1F;
+                EnqueueCommand({
+                    CMD_SPAWN_CRATE, 0, (unsigned int)id, 0,
+                    sx, sy, rule.deck,
+                    false, 0, 0, 0
+                    });
+            }
+        }
+    }
+}
+
+// ==============================================================================
+// Subclassed Game Main-Thread WndProc + Timers
+// ==============================================================================
+#define GAME_QUEUE_TIMER_ID    0x5A70
+#define GAME_MAINTAIN_TIMER_ID 0x5A71
 
 void ProcessCommandQueueOnMainThread()
 {
@@ -329,8 +569,16 @@ void ProcessCommandQueueOnMainThread()
 
 LRESULT CALLBACK SubclassGameWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-    if (uMsg == WM_TIMER && wParam == GAME_QUEUE_TIMER_ID) {
-        ProcessCommandQueueOnMainThread();
+    if (uMsg == WM_TIMER) {
+        if (wParam == GAME_QUEUE_TIMER_ID) {
+            ProcessCommandQueueOnMainThread();
+        }
+        else if (wParam == GAME_MAINTAIN_TIMER_ID) {
+            void* pPlayer = *(void**)(g_baseAddress + OFFSET_PLAYER_PTR);
+            if (pPlayer != nullptr) {
+                EvaluateAutoMaintainRules(pPlayer);
+            }
+        }
     }
     return CallWindowProcA(pOriginalGameWndProc, hwnd, uMsg, wParam, lParam);
 }
@@ -387,18 +635,32 @@ enum MenuControlIDs {
     IDC_LBL_PEEP_LOYALTY,
     IDC_EDIT_PEEP_LOYALTY,
     IDC_BTN_PEEP_SPAWN,
-    IDC_BTN_PEEP_LOG_LOADED,
+    IDC_CHK_PEEP_MAINTAIN,
+    IDC_LBL_PEEP_TARGET,
+    IDC_EDIT_PEEP_TARGET,
+    IDC_BTN_PEEP_APPLY_MAINTAIN,
+    IDC_BTN_PEEP_CLEAR_MAINTAIN,
 
     // Tab 2: SPAWN CRATES
     IDC_LBL_CRATE_TYPE = 3001,
     IDC_COMBO_CRATE_TYPE,
-    IDC_LBL_CRATE_EXTRA,
-    IDC_EDIT_CRATE_EXTRA,
+    IDC_LBL_CRATE_SUBTYPE,
+    IDC_COMBO_CRATE_SUBTYPE,
     IDC_LBL_CRATE_DECK,
     IDC_COMBO_CRATE_DECK,
-    IDC_BTN_CRATE_SPAWN_1,
-    IDC_BTN_CRATE_SPAWN_5,
+    IDC_LBL_CRATE_X,
+    IDC_EDIT_CRATE_X,
+    IDC_LBL_CRATE_Y,
+    IDC_EDIT_CRATE_Y,
+    IDC_LBL_CRATE_QTY,
+    IDC_EDIT_CRATE_QTY,
+    IDC_BTN_CRATE_SPAWN,
     IDC_BTN_CRATE_SPAWN_ALL_STD,
+    IDC_CHK_CRATE_MAINTAIN,
+    IDC_LBL_CRATE_TARGET,
+    IDC_EDIT_CRATE_TARGET,
+    IDC_BTN_CRATE_APPLY_MAINTAIN,
+    IDC_BTN_CRATE_CLEAR_MAINTAIN,
 
     // Tab 3: BUILD CHANGERS
     IDC_LBL_BUILD_TITLE = 4001,
@@ -440,13 +702,13 @@ void SwitchMenuTab(int tabIndex)
         };
 
     ShowRange(1001, 1020, tabIndex == 0); // ENERGY MANIPULATION
-    ShowRange(2001, 2030, tabIndex == 1); // SPAWN PEEPS
-    ShowRange(3001, 3020, tabIndex == 2); // SPAWN CRATES
+    ShowRange(2001, 2035, tabIndex == 1); // SPAWN PEEPS
+    ShowRange(3001, 3035, tabIndex == 2); // SPAWN CRATES
     ShowRange(4001, 4020, tabIndex == 3); // BUILD CHANGERS
     ShowRange(5001, 5020, tabIndex == 4); // HELP
 }
 
-void UpdatePeepResidentCheckboxState()
+void SyncPeepControlsForSelection()
 {
     int idx = (int)SendMessageA(GetDlgItem(g_menuHwnd, IDC_COMBO_PEEP_TYPE), CB_GETCURSEL, 0, 0);
     if (idx < 0 || idx >= PEEP_CATALOG_COUNT) return;
@@ -461,20 +723,79 @@ void UpdatePeepResidentCheckboxState()
         SendMessageA(hChkResident, BM_SETCHECK, BST_UNCHECKED, 0);
         EnableWindow(hChkResident, FALSE);
     }
+
+    std::lock_guard<std::mutex> lock(g_maintainMutex);
+    const auto& rule = g_peepMaintainRules[entry.id];
+    SendMessageA(GetDlgItem(g_menuHwnd, IDC_CHK_PEEP_MAINTAIN), BM_SETCHECK, rule.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    char buf[16];
+    sprintf_s(buf, "%d", rule.targetCount);
+    SetWindowTextA(GetDlgItem(g_menuHwnd, IDC_EDIT_PEEP_TARGET), buf);
 }
 
-void UpdateCrateExtraFieldState()
+void SyncCrateControlsForSelection()
 {
     int idx = (int)SendMessageA(GetDlgItem(g_menuHwnd, IDC_COMBO_CRATE_TYPE), CB_GETCURSEL, 0, 0);
     if (idx < 0 || idx >= CRATE_CATALOG_COUNT) return;
 
     const auto& entry = g_crateCatalog[idx];
-    HWND hEditExtra = GetDlgItem(g_menuHwnd, IDC_EDIT_CRATE_EXTRA);
-    EnableWindow(hEditExtra, entry.requiresExtra ? TRUE : FALSE);
+    HWND hComboSub = GetDlgItem(g_menuHwnd, IDC_COMBO_CRATE_SUBTYPE);
+    SendMessageA(hComboSub, CB_RESETCONTENT, 0, 0);
 
-    char buf[32];
-    sprintf_s(buf, "%u", entry.defaultExtra);
-    SetWindowTextA(hEditExtra, buf);
+    if (entry.subTypeMode == 0) {
+        SendMessageA(hComboSub, CB_ADDSTRING, 0, (LPARAM)"N/A - Standard Crate (Extra = 0)");
+        SendMessageA(hComboSub, CB_SETITEMDATA, 0, 0);
+        SendMessageA(hComboSub, CB_SETCURSEL, 0, 0);
+        EnableWindow(hComboSub, FALSE);
+    }
+    else if (entry.subTypeMode == 1) {
+        for (unsigned int t = 1; t <= 45; t++) {
+            char buf[64];
+            sprintf_s(buf, "Tech Theory ID %02u", t);
+            int itemIdx = (int)SendMessageA(hComboSub, CB_ADDSTRING, 0, (LPARAM)buf);
+            SendMessageA(hComboSub, CB_SETITEMDATA, itemIdx, (LPARAM)t);
+        }
+        SendMessageA(hComboSub, CB_SETCURSEL, 0, 0);
+        EnableWindow(hComboSub, TRUE);
+    }
+    else if (entry.subTypeMode == 2) {
+        for (int i = 0; i < PEEP_CATALOG_COUNT; i++) {
+            int itemIdx = (int)SendMessageA(hComboSub, CB_ADDSTRING, 0, (LPARAM)g_peepCatalog[i].label);
+            SendMessageA(hComboSub, CB_SETITEMDATA, itemIdx, (LPARAM)g_peepCatalog[i].id);
+        }
+        SendMessageA(hComboSub, CB_SETCURSEL, 0, 0);
+        EnableWindow(hComboSub, TRUE);
+    }
+    else if (entry.subTypeMode == 3) {
+        for (int i = 0; i < ROOM_PLAN_COUNT; i++) {
+            int itemIdx = (int)SendMessageA(hComboSub, CB_ADDSTRING, 0, (LPARAM)g_roomPlanCatalog[i].label);
+            SendMessageA(hComboSub, CB_SETITEMDATA, itemIdx, (LPARAM)g_roomPlanCatalog[i].id);
+        }
+        SendMessageA(hComboSub, CB_SETCURSEL, 0, 0);
+        EnableWindow(hComboSub, TRUE);
+    }
+    else if (entry.subTypeMode == 4) {
+        for (int i = 0; i < FURN_PLAN_COUNT; i++) {
+            int itemIdx = (int)SendMessageA(hComboSub, CB_ADDSTRING, 0, (LPARAM)g_furniturePlanCatalog[i].label);
+            SendMessageA(hComboSub, CB_SETITEMDATA, itemIdx, (LPARAM)g_furniturePlanCatalog[i].id);
+        }
+        SendMessageA(hComboSub, CB_SETCURSEL, 0, 0);
+        EnableWindow(hComboSub, TRUE);
+    }
+
+    HWND hChkMaint = GetDlgItem(g_menuHwnd, IDC_CHK_CRATE_MAINTAIN);
+    HWND hEditTarget = GetDlgItem(g_menuHwnd, IDC_EDIT_CRATE_TARGET);
+    HWND hBtnApply = GetDlgItem(g_menuHwnd, IDC_BTN_CRATE_APPLY_MAINTAIN);
+
+    EnableWindow(hChkMaint, entry.canMaintain ? TRUE : FALSE);
+    EnableWindow(hEditTarget, entry.canMaintain ? TRUE : FALSE);
+    EnableWindow(hBtnApply, entry.canMaintain ? TRUE : FALSE);
+
+    std::lock_guard<std::mutex> lock(g_maintainMutex);
+    const auto& rule = g_crateMaintainRules[entry.id];
+    SendMessageA(hChkMaint, BM_SETCHECK, (entry.canMaintain && rule.enabled) ? BST_CHECKED : BST_UNCHECKED, 0);
+    char buf[16];
+    sprintf_s(buf, "%d", entry.canMaintain ? rule.targetCount : 0);
+    SetWindowTextA(hEditTarget, buf);
 }
 
 LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -490,7 +811,7 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         g_tabHwnd = CreateWindowExA(0, WC_TABCONTROLA, "",
             WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE,
-            8, 8, 445, 360, hwnd, (HMENU)IDC_MAIN_TAB, nullptr, nullptr);
+            8, 8, 455, 420, hwnd, (HMENU)IDC_MAIN_TAB, nullptr, nullptr);
 
         const char* tabNames[] = {
             "ENERGY MANIPULATION",
@@ -508,41 +829,40 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         // --- TAB 0: ENERGY MANIPULATION ---
         CreateWindowA("STATIC", "Direct Wallet Energy Controls (No Script Needed):", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 48, 410, 20, hwnd, (HMENU)IDC_LBL_NRG_1, nullptr, nullptr);
+            22, 48, 420, 20, hwnd, (HMENU)IDC_LBL_NRG_1, nullptr, nullptr);
         CreateWindowA("BUTTON", "+50,000 Energy", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            22, 76, 130, 32, hwnd, (HMENU)IDC_BTN_NRG_ADD_50K, nullptr, nullptr);
+            22, 76, 132, 32, hwnd, (HMENU)IDC_BTN_NRG_ADD_50K, nullptr, nullptr);
         CreateWindowA("BUTTON", "+500,000 Energy", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            162, 76, 135, 32, hwnd, (HMENU)IDC_BTN_NRG_ADD_500K, nullptr, nullptr);
+            164, 76, 140, 32, hwnd, (HMENU)IDC_BTN_NRG_ADD_500K, nullptr, nullptr);
         CreateWindowA("BUTTON", "-50,000 Energy", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            307, 76, 130, 32, hwnd, (HMENU)IDC_BTN_NRG_SUB_50K, nullptr, nullptr);
+            314, 76, 132, 32, hwnd, (HMENU)IDC_BTN_NRG_SUB_50K, nullptr, nullptr);
 
         CreateWindowA("STATIC", "Custom Energy Amount (Positive or Negative):", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 125, 410, 20, hwnd, (HMENU)IDC_LBL_NRG_2, nullptr, nullptr);
+            22, 125, 420, 20, hwnd, (HMENU)IDC_LBL_NRG_2, nullptr, nullptr);
         CreateWindowA("EDIT", "100000", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_AUTOHSCROLL,
-            22, 150, 210, 26, hwnd, (HMENU)IDC_EDIT_NRG_CUSTOM, nullptr, nullptr);
+            22, 150, 215, 26, hwnd, (HMENU)IDC_EDIT_NRG_CUSTOM, nullptr, nullptr);
         CreateWindowA("BUTTON", "Apply Energy", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            242, 148, 195, 30, hwnd, (HMENU)IDC_BTN_NRG_APPLY_CUSTOM, nullptr, nullptr);
+            247, 148, 199, 30, hwnd, (HMENU)IDC_BTN_NRG_APPLY_CUSTOM, nullptr, nullptr);
 
         // --- TAB 1: SPAWN PEEPS ---
         CreateWindowA("STATIC", "Peep / Droid Species:", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 46, 415, 18, hwnd, (HMENU)IDC_LBL_PEEP_TYPE, nullptr, nullptr);
+            22, 46, 425, 18, hwnd, (HMENU)IDC_LBL_PEEP_TYPE, nullptr, nullptr);
         HWND hComboPeep = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_CLIPSIBLINGS | CBS_DROPDOWNLIST | WS_VSCROLL,
-            22, 66, 415, 280, hwnd, (HMENU)IDC_COMBO_PEEP_TYPE, nullptr, nullptr);
+            22, 66, 425, 280, hwnd, (HMENU)IDC_COMBO_PEEP_TYPE, nullptr, nullptr);
         for (int i = 0; i < PEEP_CATALOG_COUNT; i++) {
             SendMessageA(hComboPeep, CB_ADDSTRING, 0, (LPARAM)g_peepCatalog[i].label);
         }
-        SendMessageA(hComboPeep, CB_SETCURSEL, 4, 0); // Default to 05 - Salt Hog
+        SendMessageA(hComboPeep, CB_SETCURSEL, 9, 0); // Default to Salt Hog
 
         CreateWindowA("STATIC", "Target Deck:", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 98, 415, 18, hwnd, (HMENU)IDC_LBL_PEEP_DECK, nullptr, nullptr);
+            22, 98, 425, 18, hwnd, (HMENU)IDC_LBL_PEEP_DECK, nullptr, nullptr);
         HWND hComboPeepDeck = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_CLIPSIBLINGS | CBS_DROPDOWNLIST,
-            22, 118, 415, 120, hwnd, (HMENU)IDC_COMBO_PEEP_DECK, nullptr, nullptr);
+            22, 118, 425, 120, hwnd, (HMENU)IDC_COMBO_PEEP_DECK, nullptr, nullptr);
         SendMessageA(hComboPeepDeck, CB_ADDSTRING, 0, (LPARAM)"Deck 0 - Sub Deck (Engineering / Cargo)");
         SendMessageA(hComboPeepDeck, CB_ADDSTRING, 0, (LPARAM)"Deck 1 - Leisure Deck");
         SendMessageA(hComboPeepDeck, CB_ADDSTRING, 0, (LPARAM)"Deck 2 - Bio Deck");
         SendMessageA(hComboPeepDeck, CB_SETCURSEL, 0, 0);
 
-        // Coordinates (X, Y) and Quantity Row
         CreateWindowA("STATIC", "Tile X:", WS_CHILD | WS_CLIPSIBLINGS,
             22, 152, 48, 20, hwnd, (HMENU)IDC_LBL_PEEP_X, nullptr, nullptr);
         CreateWindowA("EDIT", "6", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
@@ -553,98 +873,129 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         CreateWindowA("EDIT", "6", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
             192, 149, 55, 24, hwnd, (HMENU)IDC_EDIT_PEEP_Y, nullptr, nullptr);
 
-        CreateWindowA("STATIC", "Quantity:", WS_CHILD | WS_CLIPSIBLINGS,
-            265, 152, 65, 20, hwnd, (HMENU)IDC_LBL_PEEP_QTY, nullptr, nullptr);
+        CreateWindowA("STATIC", "Qty (1-50):", WS_CHILD | WS_CLIPSIBLINGS,
+            262, 152, 72, 20, hwnd, (HMENU)IDC_LBL_PEEP_QTY, nullptr, nullptr);
         CreateWindowA("EDIT", "1", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            335, 149, 60, 24, hwnd, (HMENU)IDC_EDIT_PEEP_QTY, nullptr, nullptr);
+            338, 149, 57, 24, hwnd, (HMENU)IDC_EDIT_PEEP_QTY, nullptr, nullptr);
 
-        // Resident Checkbox
         HWND hChkRes = CreateWindowA("BUTTON", "Resident (Hired Staff)", WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
             22, 184, 210, 22, hwnd, (HMENU)IDC_CHK_PEEP_RESIDENT, nullptr, nullptr);
         SendMessageA(hChkRes, BM_SETCHECK, BST_CHECKED, 0);
 
-        // Stats Row: Skill (0-5), Dedication (0-5), Loyalty (0-5)
         CreateWindowA("STATIC", "Skill (0-5):", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 216, 72, 20, hwnd, (HMENU)IDC_LBL_PEEP_SKILL, nullptr, nullptr);
+            22, 214, 72, 20, hwnd, (HMENU)IDC_LBL_PEEP_SKILL, nullptr, nullptr);
         CreateWindowA("EDIT", "5", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            96, 213, 42, 24, hwnd, (HMENU)IDC_EDIT_PEEP_SKILL, nullptr, nullptr);
+            96, 211, 42, 24, hwnd, (HMENU)IDC_EDIT_PEEP_SKILL, nullptr, nullptr);
 
         CreateWindowA("STATIC", "Dedication (0-5):", WS_CHILD | WS_CLIPSIBLINGS,
-            150, 216, 108, 20, hwnd, (HMENU)IDC_LBL_PEEP_DEDICATION, nullptr, nullptr);
+            150, 214, 108, 20, hwnd, (HMENU)IDC_LBL_PEEP_DEDICATION, nullptr, nullptr);
         CreateWindowA("EDIT", "5", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            260, 213, 42, 24, hwnd, (HMENU)IDC_EDIT_PEEP_DEDICATION, nullptr, nullptr);
+            260, 211, 42, 24, hwnd, (HMENU)IDC_EDIT_PEEP_DEDICATION, nullptr, nullptr);
 
         CreateWindowA("STATIC", "Loyalty (0-5):", WS_CHILD | WS_CLIPSIBLINGS,
-            314, 216, 82, 20, hwnd, (HMENU)IDC_LBL_PEEP_LOYALTY, nullptr, nullptr);
+            314, 214, 82, 20, hwnd, (HMENU)IDC_LBL_PEEP_LOYALTY, nullptr, nullptr);
         CreateWindowA("EDIT", "5", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            396, 213, 41, 24, hwnd, (HMENU)IDC_EDIT_PEEP_LOYALTY, nullptr, nullptr);
+            396, 211, 51, 24, hwnd, (HMENU)IDC_EDIT_PEEP_LOYALTY, nullptr, nullptr);
 
-        // Spawn & Debug Buttons
-        CreateWindowA("BUTTON", "Spawn Peep(s)", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            22, 252, 415, 34, hwnd, (HMENU)IDC_BTN_PEEP_SPAWN, nullptr, nullptr);
-        CreateWindowA("BUTTON", "Print Loaded Map Species IDs to Console", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            22, 294, 415, 28, hwnd, (HMENU)IDC_BTN_PEEP_LOG_LOADED, nullptr, nullptr);
+        CreateWindowA("BUTTON", "Spawn Peep(s) Now (Paced Grid)", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            22, 246, 425, 32, hwnd, (HMENU)IDC_BTN_PEEP_SPAWN, nullptr, nullptr);
+
+        CreateWindowA("BUTTON", "Maintain Target Count", WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
+            22, 292, 165, 22, hwnd, (HMENU)IDC_CHK_PEEP_MAINTAIN, nullptr, nullptr);
+        CreateWindowA("STATIC", "Target:", WS_CHILD | WS_CLIPSIBLINGS,
+            195, 294, 50, 20, hwnd, (HMENU)IDC_LBL_PEEP_TARGET, nullptr, nullptr);
+        CreateWindowA("EDIT", "0", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
+            248, 291, 48, 24, hwnd, (HMENU)IDC_EDIT_PEEP_TARGET, nullptr, nullptr);
+        CreateWindowA("BUTTON", "Save Rule", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            306, 290, 141, 26, hwnd, (HMENU)IDC_BTN_PEEP_APPLY_MAINTAIN, nullptr, nullptr);
+
+        CreateWindowA("BUTTON", "Clear All Peep Auto-Maintain Rules", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            22, 326, 425, 28, hwnd, (HMENU)IDC_BTN_PEEP_CLEAR_MAINTAIN, nullptr, nullptr);
 
         // --- TAB 2: SPAWN CRATES ---
-        CreateWindowA("STATIC", "Crate / Portable Type (CT_* Catalog):", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 48, 415, 20, hwnd, (HMENU)IDC_LBL_CRATE_TYPE, nullptr, nullptr);
+        CreateWindowA("STATIC", "Crate / Portable Type (Alphabetical):", WS_CHILD | WS_CLIPSIBLINGS,
+            22, 46, 425, 18, hwnd, (HMENU)IDC_LBL_CRATE_TYPE, nullptr, nullptr);
         HWND hComboCrate = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_CLIPSIBLINGS | CBS_DROPDOWNLIST | WS_VSCROLL,
-            22, 72, 415, 280, hwnd, (HMENU)IDC_COMBO_CRATE_TYPE, nullptr, nullptr);
+            22, 66, 425, 280, hwnd, (HMENU)IDC_COMBO_CRATE_TYPE, nullptr, nullptr);
         for (int i = 0; i < CRATE_CATALOG_COUNT; i++) {
             SendMessageA(hComboCrate, CB_ADDSTRING, 0, (LPARAM)g_crateCatalog[i].label);
         }
-        SendMessageA(hComboCrate, CB_SETCURSEL, 2, 0);
+        SendMessageA(hComboCrate, CB_SETCURSEL, 5, 0); // Default to Food Crate
 
-        CreateWindowA("STATIC", "Extra / Sub-Type ID (Tech, Droid, Room Plan, Furniture):", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 108, 330, 20, hwnd, (HMENU)IDC_LBL_CRATE_EXTRA, nullptr, nullptr);
-        CreateWindowA("EDIT", "0", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER | WS_DISABLED,
-            362, 105, 75, 24, hwnd, (HMENU)IDC_EDIT_CRATE_EXTRA, nullptr, nullptr);
+        CreateWindowA("STATIC", "Crate Sub-Type (Hardplan, Furniture, Droid, Tech):", WS_CHILD | WS_CLIPSIBLINGS,
+            22, 98, 425, 18, hwnd, (HMENU)IDC_LBL_CRATE_SUBTYPE, nullptr, nullptr);
+        CreateWindowA("COMBOBOX", "", WS_CHILD | WS_CLIPSIBLINGS | CBS_DROPDOWNLIST | WS_VSCROLL,
+            22, 118, 425, 280, hwnd, (HMENU)IDC_COMBO_CRATE_SUBTYPE, nullptr, nullptr);
 
         CreateWindowA("STATIC", "Target Deck:", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 138, 415, 20, hwnd, (HMENU)IDC_LBL_CRATE_DECK, nullptr, nullptr);
+            22, 150, 425, 18, hwnd, (HMENU)IDC_LBL_CRATE_DECK, nullptr, nullptr);
         HWND hComboCrateDeck = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_CLIPSIBLINGS | CBS_DROPDOWNLIST,
-            22, 162, 415, 120, hwnd, (HMENU)IDC_COMBO_CRATE_DECK, nullptr, nullptr);
+            22, 170, 425, 120, hwnd, (HMENU)IDC_COMBO_CRATE_DECK, nullptr, nullptr);
         SendMessageA(hComboCrateDeck, CB_ADDSTRING, 0, (LPARAM)"Deck 0 - Sub Deck (Engineering / Cargo)");
         SendMessageA(hComboCrateDeck, CB_ADDSTRING, 0, (LPARAM)"Deck 1 - Leisure Deck");
         SendMessageA(hComboCrateDeck, CB_ADDSTRING, 0, (LPARAM)"Deck 2 - Bio Deck");
         SendMessageA(hComboCrateDeck, CB_SETCURSEL, 0, 0);
 
-        CreateWindowA("BUTTON", "Spawn 1x Crate", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            22, 202, 200, 34, hwnd, (HMENU)IDC_BTN_CRATE_SPAWN_1, nullptr, nullptr);
-        CreateWindowA("BUTTON", "Spawn 5x Crates (Grid)", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            237, 202, 200, 34, hwnd, (HMENU)IDC_BTN_CRATE_SPAWN_5, nullptr, nullptr);
-        CreateWindowA("BUTTON", "Spawn All Standard Crates (Grid Layout)", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            22, 246, 415, 32, hwnd, (HMENU)IDC_BTN_CRATE_SPAWN_ALL_STD, nullptr, nullptr);
+        CreateWindowA("STATIC", "Tile X:", WS_CHILD | WS_CLIPSIBLINGS,
+            22, 206, 48, 20, hwnd, (HMENU)IDC_LBL_CRATE_X, nullptr, nullptr);
+        CreateWindowA("EDIT", "8", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
+            72, 203, 55, 24, hwnd, (HMENU)IDC_EDIT_CRATE_X, nullptr, nullptr);
+
+        CreateWindowA("STATIC", "Tile Y:", WS_CHILD | WS_CLIPSIBLINGS,
+            142, 206, 48, 20, hwnd, (HMENU)IDC_LBL_CRATE_Y, nullptr, nullptr);
+        CreateWindowA("EDIT", "6", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
+            192, 203, 55, 24, hwnd, (HMENU)IDC_EDIT_CRATE_Y, nullptr, nullptr);
+
+        CreateWindowA("STATIC", "Qty (1-50):", WS_CHILD | WS_CLIPSIBLINGS,
+            262, 206, 72, 20, hwnd, (HMENU)IDC_LBL_CRATE_QTY, nullptr, nullptr);
+        CreateWindowA("EDIT", "1", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
+            338, 203, 57, 24, hwnd, (HMENU)IDC_EDIT_CRATE_QTY, nullptr, nullptr);
+
+        CreateWindowA("BUTTON", "Spawn Crate(s) Now", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            22, 238, 205, 32, hwnd, (HMENU)IDC_BTN_CRATE_SPAWN, nullptr, nullptr);
+        CreateWindowA("BUTTON", "Spawn All 17 Types", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            237, 238, 210, 32, hwnd, (HMENU)IDC_BTN_CRATE_SPAWN_ALL_STD, nullptr, nullptr);
+
+        CreateWindowA("BUTTON", "Maintain Target Count", WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
+            22, 284, 165, 22, hwnd, (HMENU)IDC_CHK_CRATE_MAINTAIN, nullptr, nullptr);
+        CreateWindowA("STATIC", "Target:", WS_CHILD | WS_CLIPSIBLINGS,
+            195, 286, 50, 20, hwnd, (HMENU)IDC_LBL_CRATE_TARGET, nullptr, nullptr);
+        CreateWindowA("EDIT", "0", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
+            248, 283, 48, 24, hwnd, (HMENU)IDC_EDIT_CRATE_TARGET, nullptr, nullptr);
+        CreateWindowA("BUTTON", "Save Rule", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            306, 282, 141, 26, hwnd, (HMENU)IDC_BTN_CRATE_APPLY_MAINTAIN, nullptr, nullptr);
+
+        CreateWindowA("BUTTON", "Clear All Crate Auto-Maintain Rules", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            22, 318, 425, 28, hwnd, (HMENU)IDC_BTN_CRATE_CLEAR_MAINTAIN, nullptr, nullptr);
 
         // --- TAB 3: BUILD CHANGERS ---
         CreateWindowA("STATIC", "Station Build & Segment Modifiers:", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 48, 415, 20, hwnd, (HMENU)IDC_LBL_BUILD_TITLE, nullptr, nullptr);
+            22, 48, 425, 20, hwnd, (HMENU)IDC_LBL_BUILD_TITLE, nullptr, nullptr);
         CreateWindowA("BUTTON", "Instant Room & Furniture Construction (WIP)", WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
-            22, 80, 415, 24, hwnd, (HMENU)IDC_CHK_BUILD_INSTANT, nullptr, nullptr);
+            22, 80, 425, 24, hwnd, (HMENU)IDC_CHK_BUILD_INSTANT, nullptr, nullptr);
         CreateWindowA("BUTTON", "Unlock All Segment Bulkheads (WIP)", WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
-            22, 112, 415, 24, hwnd, (HMENU)IDC_CHK_BUILD_UNLOCK_ALL, nullptr, nullptr);
+            22, 112, 425, 24, hwnd, (HMENU)IDC_CHK_BUILD_UNLOCK_ALL, nullptr, nullptr);
         CreateWindowA("STATIC",
             "Ready to wire directly to Startopia's build timer & segment\n"
             "ownership flags once offsets are confirmed.",
-            WS_CHILD | WS_CLIPSIBLINGS, 22, 152, 415, 45, hwnd, (HMENU)IDC_LBL_BUILD_NOTE, nullptr, nullptr);
+            WS_CHILD | WS_CLIPSIBLINGS, 22, 152, 425, 45, hwnd, (HMENU)IDC_LBL_BUILD_NOTE, nullptr, nullptr);
 
         // --- TAB 4: HELP ---
         CreateWindowA("STATIC",
             "STARTOPIA STANDALONE DLL CHEAT MENU\n\n"
             "• [INSERT] : Show / Hide this Menu Overlay\n"
             "• Deck 0 = Sub Deck | Deck 1 = Leisure | Deck 2 = Bio\n"
-            "• Tile X / Y are local offsets (0..15) inside your active sector.\n"
-            "• Resident is disabled for Droids (01..04) & non-staff species\n"
-            "  (Gem Slug, Penitent, Space Vermin, Memau, Skrasher, Spy).\n"
-            "• Crate Extra IDs:\n"
-            "   - ID 05 (Tech): Tech Theory ID (>= 1)\n"
-            "   - ID 14 (Scutter): Peep/Droid ID (1..22)\n"
-            "   - ID 15 (Hardplan): Room Type ID (1..41)\n"
-            "   - ID 16 (Furniture): Furniture Type ID (1..45)",
-            WS_CHILD | WS_CLIPSIBLINGS, 22, 48, 415, 275, hwnd, (HMENU)IDC_LBL_HELP_TEXT, nullptr, nullptr);
+            "• Auto-Maintain Rules:\n"
+            "   - Check 'Maintain Target Count', enter Target (0..50), and\n"
+            "     click 'Save Rule' for each Peep or Standard Crate type.\n"
+            "   - Every 2.5s the DLL counts your active stock/staff and\n"
+            "     automatically spawns replacements if count < target.\n"
+            "   - Resident vs. Visitor status is tracked separately (+0x30D).",
+            WS_CHILD | WS_CLIPSIBLINGS, 22, 48, 425, 310, hwnd, (HMENU)IDC_LBL_HELP_TEXT, nullptr, nullptr);
 
         SetChildFont(hwnd);
-        UpdatePeepResidentCheckboxState();
+        SyncPeepControlsForSelection();
+        SyncCrateControlsForSelection();
         SwitchMenuTab(0);
         break;
     }
@@ -664,15 +1015,12 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         // --- Energy Tab Actions ---
         if (id == IDC_BTN_NRG_ADD_50K && code == BN_CLICKED) {
-            LogMsg("[UI] Queued +50,000 Energy\n");
             EnqueueCommand({ CMD_ADD_ENERGY, 50000, 0, 0, 0, 0, 0, false, 0, 0, 0 });
         }
         else if (id == IDC_BTN_NRG_ADD_500K && code == BN_CLICKED) {
-            LogMsg("[UI] Queued +500,000 Energy\n");
             EnqueueCommand({ CMD_ADD_ENERGY, 500000, 0, 0, 0, 0, 0, false, 0, 0, 0 });
         }
         else if (id == IDC_BTN_NRG_SUB_50K && code == BN_CLICKED) {
-            LogMsg("[UI] Queued -50,000 Energy\n");
             EnqueueCommand({ CMD_ADD_ENERGY, -50000, 0, 0, 0, 0, 0, false, 0, 0, 0 });
         }
         else if (id == IDC_BTN_NRG_APPLY_CUSTOM && code == BN_CLICKED) {
@@ -680,14 +1028,13 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_NRG_CUSTOM), buf, sizeof(buf));
             int val = atoi(buf);
             if (val != 0) {
-                LogMsg("[UI] Queued Custom Energy: %+d\n", val);
                 EnqueueCommand({ CMD_ADD_ENERGY, val, 0, 0, 0, 0, 0, false, 0, 0, 0 });
             }
         }
 
         // --- Peep Tab Actions ---
         else if (id == IDC_COMBO_PEEP_TYPE && code == CBN_SELCHANGE) {
-            UpdatePeepResidentCheckboxState();
+            SyncPeepControlsForSelection();
         }
         else if (id == IDC_BTN_PEEP_SPAWN && code == BN_CLICKED) {
             int idx = (int)SendMessageA(GetDlgItem(hwnd, IDC_COMBO_PEEP_TYPE), CB_GETCURSEL, 0, 0);
@@ -708,17 +1055,18 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             unsigned char ded = (unsigned char)ClampInt(atoi(bufDed), 0, 5);
             unsigned char loy = (unsigned char)ClampInt(atoi(bufLoy), 0, 5);
 
+            char clampedBuf[16];
+            sprintf_s(clampedBuf, "%d", qty);
+            SetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_PEEP_QTY), clampedBuf);
+
             if (idx >= 0 && idx < PEEP_CATALOG_COUNT) {
                 const auto& entry = g_peepCatalog[idx];
                 bool isResident = entry.canBeResident &&
                     (SendMessageA(GetDlgItem(hwnd, IDC_CHK_PEEP_RESIDENT), BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-                LogMsg("[UI] Queued %dx %s at (%d,%d) Deck %d | Res=%d | S/D/L=%u/%u/%u\n",
-                    qty, entry.label, baseX, baseY, deck, isResident ? 1 : 0, skill, ded, loy);
-
                 for (int i = 0; i < qty; i++) {
-                    int spawnX = (baseX + (i % 5)) & 0x0F;
-                    int spawnY = (baseY + (i / 5)) & 0x1F;
+                    int spawnX = (baseX + (i % 6)) & 0x0F;
+                    int spawnY = (baseY + (i / 6)) & 0x1F;
                     EnqueueCommand({
                         CMD_SPAWN_PEEP, 0, entry.id, 0,
                         spawnX, spawnY, deck,
@@ -727,56 +1075,144 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 }
             }
         }
-        else if (id == IDC_BTN_PEEP_LOG_LOADED && code == BN_CLICKED) {
-            void** speciesTable = (void**)(g_baseAddress + OFFSET_SPECIES_TABLE);
-            LogMsg("[SPECIES] Loaded Peep IDs in current map: ");
-            for (int i = 1; i <= 23; i++) {
-                if (speciesTable[i] != nullptr) LogMsg("%d ", i);
+        else if (id == IDC_BTN_PEEP_APPLY_MAINTAIN && code == BN_CLICKED) {
+            int idx = (int)SendMessageA(GetDlgItem(hwnd, IDC_COMBO_PEEP_TYPE), CB_GETCURSEL, 0, 0);
+            int deck = (int)SendMessageA(GetDlgItem(hwnd, IDC_COMBO_PEEP_DECK), CB_GETCURSEL, 0, 0);
+
+            char bufX[16]{}, bufY[16]{}, bufTarget[16]{}, bufSkill[16]{}, bufDed[16]{}, bufLoy[16]{};
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_PEEP_X), bufX, sizeof(bufX));
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_PEEP_Y), bufY, sizeof(bufY));
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_PEEP_TARGET), bufTarget, sizeof(bufTarget));
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_PEEP_SKILL), bufSkill, sizeof(bufSkill));
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_PEEP_DEDICATION), bufDed, sizeof(bufDed));
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_PEEP_LOYALTY), bufLoy, sizeof(bufLoy));
+
+            int target = ClampInt(atoi(bufTarget), 0, 50);
+            bool enabled = (SendMessageA(GetDlgItem(hwnd, IDC_CHK_PEEP_MAINTAIN), BM_GETCHECK, 0, 0) == BST_CHECKED) && (target > 0);
+
+            char clampedBuf[16];
+            sprintf_s(clampedBuf, "%d", target);
+            SetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_PEEP_TARGET), clampedBuf);
+
+            if (idx >= 0 && idx < PEEP_CATALOG_COUNT) {
+                const auto& entry = g_peepCatalog[idx];
+                bool isResident = entry.canBeResident &&
+                    (SendMessageA(GetDlgItem(hwnd, IDC_CHK_PEEP_RESIDENT), BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+                std::lock_guard<std::mutex> lock(g_maintainMutex);
+                g_peepMaintainRules[entry.id] = {
+                    enabled,
+                    target,
+                    ClampInt(atoi(bufX), 0, 15),
+                    ClampInt(atoi(bufY), 0, 31),
+                    deck,
+                    isResident,
+                    (unsigned char)ClampInt(atoi(bufSkill), 0, 5),
+                    (unsigned char)ClampInt(atoi(bufDed), 0, 5),
+                    (unsigned char)ClampInt(atoi(bufLoy), 0, 5)
+                };
+                LogMsg("[RULE-PEEP] %s -> Maintain=%s | Target=%d | Res=%d\n",
+                    entry.label, enabled ? "ON" : "OFF", target, isResident ? 1 : 0);
             }
-            LogMsg("\n");
+        }
+        else if (id == IDC_BTN_PEEP_CLEAR_MAINTAIN && code == BN_CLICKED) {
+            std::lock_guard<std::mutex> lock(g_maintainMutex);
+            memset(g_peepMaintainRules, 0, sizeof(g_peepMaintainRules));
+            SendMessageA(GetDlgItem(hwnd, IDC_CHK_PEEP_MAINTAIN), BM_SETCHECK, BST_UNCHECKED, 0);
+            SetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_PEEP_TARGET), "0");
+            LogMsg("[RULE-PEEP] Cleared all Peep auto-maintain rules.\n");
         }
 
         // --- Crate Tab Actions ---
         else if (id == IDC_COMBO_CRATE_TYPE && code == CBN_SELCHANGE) {
-            UpdateCrateExtraFieldState();
+            SyncCrateControlsForSelection();
         }
-        else if (id == IDC_BTN_CRATE_SPAWN_1 && code == BN_CLICKED) {
+        else if (id == IDC_BTN_CRATE_SPAWN && code == BN_CLICKED) {
             int idx = (int)SendMessageA(GetDlgItem(hwnd, IDC_COMBO_CRATE_TYPE), CB_GETCURSEL, 0, 0);
             int deck = (int)SendMessageA(GetDlgItem(hwnd, IDC_COMBO_CRATE_DECK), CB_GETCURSEL, 0, 0);
-            char extraBuf[32]{};
-            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_EXTRA), extraBuf, sizeof(extraBuf));
-            unsigned int extraVal = (unsigned int)atoi(extraBuf);
+
+            HWND hComboSub = GetDlgItem(hwnd, IDC_COMBO_CRATE_SUBTYPE);
+            int subIdx = (int)SendMessageA(hComboSub, CB_GETCURSEL, 0, 0);
+            unsigned int extraVal = (subIdx >= 0) ? (unsigned int)SendMessageA(hComboSub, CB_GETITEMDATA, subIdx, 0) : 0;
+
+            char bufX[16]{}, bufY[16]{}, bufQty[16]{};
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_X), bufX, sizeof(bufX));
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_Y), bufY, sizeof(bufY));
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_QTY), bufQty, sizeof(bufQty));
+
+            int baseX = ClampInt(atoi(bufX), 0, 15);
+            int baseY = ClampInt(atoi(bufY), 0, 31);
+            int qty = ClampInt(atoi(bufQty), 1, 50);
+
+            char clampedBuf[16];
+            sprintf_s(clampedBuf, "%d", qty);
+            SetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_QTY), clampedBuf);
 
             if (idx >= 0 && idx < CRATE_CATALOG_COUNT) {
-                LogMsg("[UI] Queued 1x Crate ID %u (Extra=%u) on Deck %d\n", g_crateCatalog[idx].id, extraVal, deck);
-                EnqueueCommand({ CMD_SPAWN_CRATE, 0, g_crateCatalog[idx].id, extraVal, 8, 6, deck, false, 0, 0, 0 });
-            }
-        }
-        else if (id == IDC_BTN_CRATE_SPAWN_5 && code == BN_CLICKED) {
-            int idx = (int)SendMessageA(GetDlgItem(hwnd, IDC_COMBO_CRATE_TYPE), CB_GETCURSEL, 0, 0);
-            int deck = (int)SendMessageA(GetDlgItem(hwnd, IDC_COMBO_CRATE_DECK), CB_GETCURSEL, 0, 0);
-            char extraBuf[32]{};
-            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_EXTRA), extraBuf, sizeof(extraBuf));
-            unsigned int extraVal = (unsigned int)atoi(extraBuf);
-
-            if (idx >= 0 && idx < CRATE_CATALOG_COUNT) {
-                LogMsg("[UI] Queued 5x Crate ID %u (Extra=%u) on Deck %d\n", g_crateCatalog[idx].id, extraVal, deck);
-                for (int i = 0; i < 5; i++) {
-                    EnqueueCommand({ CMD_SPAWN_CRATE, 0, g_crateCatalog[idx].id, extraVal, 6 + i, 6, deck, false, 0, 0, 0 });
+                const auto& entry = g_crateCatalog[idx];
+                for (int i = 0; i < qty; i++) {
+                    int spawnX = (baseX + (i % 6)) & 0x0F;
+                    int spawnY = (baseY + (i / 6)) & 0x1F;
+                    EnqueueCommand({
+                        CMD_SPAWN_CRATE, 0, entry.id, extraVal,
+                        spawnX, spawnY, deck,
+                        false, 0, 0, 0
+                        });
                 }
             }
         }
         else if (id == IDC_BTN_CRATE_SPAWN_ALL_STD && code == BN_CLICKED) {
             int deck = (int)SendMessageA(GetDlgItem(hwnd, IDC_COMBO_CRATE_DECK), CB_GETCURSEL, 0, 0);
-            LogMsg("[UI] Queued ALL 17 Crate Types on Deck %d\n", deck);
-            int gridIdx = 0;
+            char bufX[16]{}, bufY[16]{};
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_X), bufX, sizeof(bufX));
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_Y), bufY, sizeof(bufY));
+            int baseX = ClampInt(atoi(bufX), 0, 15);
+            int baseY = ClampInt(atoi(bufY), 0, 31);
+
             for (int i = 0; i < CRATE_CATALOG_COUNT; i++) {
                 const auto& entry = g_crateCatalog[i];
-                int gx = 5 + (gridIdx % 6);
-                int gz = 5 + (gridIdx / 6);
-                gridIdx++;
-                EnqueueCommand({ CMD_SPAWN_CRATE, 0, entry.id, entry.defaultExtra, gx, gz, deck, false, 0, 0, 0 });
+                unsigned int defExtra = (entry.subTypeMode != 0) ? 1 : 0;
+                int gx = (baseX + (i % 6)) & 0x0F;
+                int gz = (baseY + (i / 6)) & 0x1F;
+                EnqueueCommand({ CMD_SPAWN_CRATE, 0, entry.id, defExtra, gx, gz, deck, false, 0, 0, 0 });
             }
+        }
+        else if (id == IDC_BTN_CRATE_APPLY_MAINTAIN && code == BN_CLICKED) {
+            int idx = (int)SendMessageA(GetDlgItem(hwnd, IDC_COMBO_CRATE_TYPE), CB_GETCURSEL, 0, 0);
+            int deck = (int)SendMessageA(GetDlgItem(hwnd, IDC_COMBO_CRATE_DECK), CB_GETCURSEL, 0, 0);
+
+            char bufX[16]{}, bufY[16]{}, bufTarget[16]{};
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_X), bufX, sizeof(bufX));
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_Y), bufY, sizeof(bufY));
+            GetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_TARGET), bufTarget, sizeof(bufTarget));
+
+            int target = ClampInt(atoi(bufTarget), 0, 50);
+            char clampedBuf[16];
+            sprintf_s(clampedBuf, "%d", target);
+            SetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_TARGET), clampedBuf);
+
+            if (idx >= 0 && idx < CRATE_CATALOG_COUNT && g_crateCatalog[idx].canMaintain) {
+                const auto& entry = g_crateCatalog[idx];
+                bool enabled = (SendMessageA(GetDlgItem(hwnd, IDC_CHK_CRATE_MAINTAIN), BM_GETCHECK, 0, 0) == BST_CHECKED) && (target > 0);
+
+                std::lock_guard<std::mutex> lock(g_maintainMutex);
+                g_crateMaintainRules[entry.id] = {
+                    enabled,
+                    target,
+                    ClampInt(atoi(bufX), 0, 15),
+                    ClampInt(atoi(bufY), 0, 31),
+                    deck
+                };
+                LogMsg("[RULE-CRATE] %s -> Maintain=%s | Target=%d\n",
+                    entry.label, enabled ? "ON" : "OFF", target);
+            }
+        }
+        else if (id == IDC_BTN_CRATE_CLEAR_MAINTAIN && code == BN_CLICKED) {
+            std::lock_guard<std::mutex> lock(g_maintainMutex);
+            memset(g_crateMaintainRules, 0, sizeof(g_crateMaintainRules));
+            SendMessageA(GetDlgItem(hwnd, IDC_CHK_CRATE_MAINTAIN), BM_SETCHECK, BST_UNCHECKED, 0);
+            SetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_CRATE_TARGET), "0");
+            LogMsg("[RULE-CRATE] Cleared all Crate auto-maintain rules.\n");
         }
         break;
     }
@@ -803,7 +1239,7 @@ void CreateTabbedMenuWindow(HMODULE hModule)
         "StartopiaStandaloneCheatMenu",
         "Startopia Cheat Mod (Standalone DLL)",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        35, 35, 478, 415,
+        35, 35, 488, 475,
         nullptr, nullptr, hModule, nullptr
     );
 
@@ -838,8 +1274,9 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 
     if (g_gameHwnd != nullptr) {
         pOriginalGameWndProc = (WNDPROC)SetWindowLongA(g_gameHwnd, GWL_WNDPROC, (LONG)SubclassGameWndProc);
-        SetTimer(g_gameHwnd, GAME_QUEUE_TIMER_ID, 50, nullptr);
-        LogMsg("Attached main-thread queue processor to Startopia HWND: 0x%p\n", g_gameHwnd);
+        SetTimer(g_gameHwnd, GAME_QUEUE_TIMER_ID, 100, nullptr);
+        SetTimer(g_gameHwnd, GAME_MAINTAIN_TIMER_ID, 2500, nullptr);
+        LogMsg("Attached paced queue (100ms) & auto-maintain watcher (2500ms) to HWND: 0x%p\n", g_gameHwnd);
     }
     else {
         LogMsg("[ERROR] Could not locate Startopia main window handle!\n");
