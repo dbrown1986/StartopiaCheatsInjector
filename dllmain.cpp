@@ -41,12 +41,12 @@ const DWORD OFFSET_SPAWN_PORTABLE = 0x0018F9D0; // FUN_0058f9d0 (Portable/Crate 
 const DWORD OFFSET_GET_PLAYER_SECTOR = 0x0023C680; // FUN_0063c680 (Gets player's station sector)
 const DWORD OFFSET_PACK_COORDS = 0x00061280; // FUN_00461280 (Packs X, Z, Deck into tile ID)
 const DWORD OFFSET_GET_ENTITY_OWNER = 0x00212BB0; // FUN_00612bb0 (Returns entity's owning pPlayer)
-const DWORD OFFSET_ITER_INIT = 0x001CA630; // FUN_005ca630 (Native Entity Iterator Init)
-const DWORD OFFSET_ITER_NEXT = 0x001CB510; // FUN_005cb510 (Native Entity Iterator Next -> pEntity)
 const DWORD OFFSET_SPECIES_TABLE = 0x004D9AF8; // DAT_008d9af8 (Loaded Peep definitions)
 const DWORD OFFSET_ENTITY_TABLE = 0x006A306C; // DAT_00aa306c (Global Entity Slot Array)
 const DWORD OFFSET_FLAG_MP_MODE = 0x007FE1AC; // DAT_00bfe1ac
 const DWORD OFFSET_PLAYER_PTR = 0x007F5170; // DAT_00bf5170
+const DWORD OFFSET_ITER_INIT = 0x001CA630; // FUN_005ca630 (__cdecl)
+const DWORD OFFSET_ITER_NEXT = 0x001CB510; // FUN_005cb510 (__cdecl)
 
 DWORD   g_baseAddress = 0;
 FILE* g_logFile = nullptr;
@@ -294,15 +294,22 @@ void EnqueueCommand(const ModCommand& cmd)
 // ==============================================================================
 void LogMsg(const char* fmt, ...)
 {
-    char buffer[1024];
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+
+    char msgBuf[1024];
     va_list args;
     va_start(args, fmt);
-    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    vsnprintf(msgBuf, sizeof(msgBuf), fmt, args);
     va_end(args);
 
-    printf("%s", buffer);
+    char finalBuf[1152];
+    snprintf(finalBuf, sizeof(finalBuf), "[%02d:%02d:%02d.%03d] %s",
+        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msgBuf);
+
+    printf("%s", finalBuf);
     if (g_logFile) {
-        fprintf(g_logFile, "%s", buffer);
+        fprintf(g_logFile, "%s", finalBuf);
         fflush(g_logFile);
     }
 }
@@ -331,12 +338,12 @@ LONG WINAPI GlobalVectoredCrashHandler(PEXCEPTION_POINTERS ep)
 // ==============================================================================
 // Engine Function Typedefs & Execution Helpers
 // ==============================================================================
+typedef void(__cdecl* tIterInit)(void* pIterBuf, void* pPlayer, int entClass, int subType);
+typedef void* (__cdecl* tIterNext)(void* pIterBuf);
 typedef unsigned int(__fastcall* tScriptAddEnergy)(void* pPlayer, int amount);
 typedef int(__fastcall* tGetPlayerSector)(void* pPlayer, int unusedDeck);
 typedef unsigned int* (__thiscall* tPackCoords)(unsigned int* outPacked, char x, unsigned int z, unsigned int deck);
 typedef void* (__fastcall* tGetEntityOwner)(void* pEntity);
-typedef void(__fastcall* tIterInit)(void* pIterBuf, void* pPlayer, int entClass, int subType);
-typedef void* (__fastcall* tIterNext)(void* pIterBuf);
 typedef unsigned int(__fastcall* tSpawnPeepSP)(int mode, unsigned int* pPackedCoords, unsigned int peepType, unsigned short angle, void* pPlayer, void* pAttr);
 typedef void(__fastcall* tSpawnPeepMP)(int mode, unsigned int* pPackedCoords, int peepType, unsigned int angle, void* pPlayer, int* pAttr);
 typedef unsigned int(__fastcall* tSpawnPortable)(unsigned int* pPackedCoords, unsigned int cargoType, unsigned int angle, void* pPlayer, unsigned int extraData, int flag);
@@ -417,48 +424,107 @@ void ExecuteSpawnCrate(void* pPlayer, unsigned int cargoTypeId, unsigned int ext
 }
 
 // ==============================================================================
-// Native Entity Counter & Auto-Maintain Evaluator (Runs on Main Thread)
+// SEH-Protected Entity Table Counter & Auto-Maintain Evaluator
+// ==============================================================================
+void ScanEntityCountsSafe(void* pPlayer, int* liveResidentCounts, int* liveNonHireableCounts, int* liveCrateCounts)
+{
+    auto GetEntityOwner = (tGetEntityOwner)(g_baseAddress + OFFSET_GET_ENTITY_OWNER);
+    DWORD* entitySlots = (DWORD*)(g_baseAddress + OFFSET_ENTITY_TABLE);
+
+    __try {
+        for (int idx = 1; idx < 4096; idx++) {
+            void* pEnt = (void*)entitySlots[idx * 2];
+            if (pEnt == nullptr || (uintptr_t)pEnt < 0x10000) continue;
+
+            // Skip entities flagged as destroyed / dying / departing (bits 0x18 at +0x3E)
+            BYTE stateFlags = *(BYTE*)((BYTE*)pEnt + 0x3E);
+            if ((stateFlags & 0x18) != 0) continue;
+
+            DWORD* vtable = *(DWORD**)pEnt;
+            if (vtable == nullptr || (uintptr_t)vtable < 0x10000) continue;
+
+            // Only count entities owned by the local human player
+            if (GetEntityOwner(pEnt) != pPlayer) continue;
+
+            typedef int(__thiscall* tGetEntityClass)(void* self);
+            typedef int(__thiscall* tGetEntitySubType)(void* self);
+            int entClass = ((tGetEntityClass)vtable[0x18 / 4])(pEnt);
+
+            if (entClass == 1) {
+                int speciesId = ((tGetEntitySubType)vtable[0x1C / 4])(pEnt);
+                if (speciesId >= 1 && speciesId <= 23) {
+                    liveNonHireableCounts[speciesId]++;
+
+                    BYTE visitorFlag = *(BYTE*)((BYTE*)pEnt + 0x30D);
+                    bool isResident = (visitorFlag == 0) || (speciesId >= 1 && speciesId <= 4);
+                    if (isResident) {
+                        liveResidentCounts[speciesId]++;
+                    }
+                }
+            }
+            else if (entClass == 2) {
+                int cargoId = ((tGetEntitySubType)vtable[0x1C / 4])(pEnt);
+                if (cargoId >= 1 && cargoId <= 17) {
+                    liveCrateCounts[cargoId]++;
+                }
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        LogMsg("[WARN] Skipped entity scan tick due to mid-frame object reallocation.\n");
+    }
+}
+
+// ==============================================================================
+// Fast, Zero-Stutter Native Entity Counter (__cdecl FUN_005ca630 + FUN_005cb510)
 // ==============================================================================
 void EvaluateAutoMaintainRules(void* pPlayer)
 {
+    // Quick exit if no Auto-Maintain rules are enabled at all
+    bool anyRuleActive = false;
+    {
+        std::lock_guard<std::mutex> lock(g_maintainMutex);
+        for (int i = 1; i <= 22; i++) {
+            if (g_peepMaintainRules[i].enabled && g_peepMaintainRules[i].targetCount > 0) {
+                anyRuleActive = true;
+                break;
+            }
+        }
+        if (!anyRuleActive) {
+            for (int i = 1; i <= 17; i++) {
+                if (g_crateMaintainRules[i].enabled && g_crateMaintainRules[i].targetCount > 0) {
+                    anyRuleActive = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (!anyRuleActive) return;
+
     {
         std::lock_guard<std::mutex> lock(g_cmdMutex);
         if (!g_cmdQueue.empty()) return;
     }
 
-    auto GetEntityOwner = (tGetEntityOwner)(g_baseAddress + OFFSET_GET_ENTITY_OWNER);
-    DWORD* entitySlots = (DWORD*)(g_baseAddress + OFFSET_ENTITY_TABLE);
+    auto IterInit = (tIterInit)(g_baseAddress + OFFSET_ITER_INIT);
+    auto IterNext = (tIterNext)(g_baseAddress + OFFSET_ITER_NEXT);
 
     int liveResidentCounts[24]{};
-    int liveAnyPeepCounts[24]{};
+    int liveNonHireableCounts[24]{};
     int liveCrateCounts[18]{};
 
-    // Scan active entity table (DAT_00aa306c, 8 bytes per slot, indices 1..4095)
-    for (int idx = 1; idx < 4096; idx++) {
-        void* pEnt = (void*)entitySlots[idx * 2];
-        if (pEnt == nullptr) continue;
-
-        // Skip entities flagged as destroyed / dying / departing (bits 0x18 at +0x3E)
+    // 1. Iterate ONLY player's Peeps/Droids (entClass = 1)
+    DWORD iterBuf[16]{};
+    IterInit(iterBuf, pPlayer, 1, -1);
+    void* pEnt = IterNext(iterBuf);
+    while (pEnt != nullptr) {
         BYTE stateFlags = *(BYTE*)((BYTE*)pEnt + 0x3E);
-        if ((stateFlags & 0x18) != 0) continue;
-
-        // Only count entities owned by the local human player
-        if (GetEntityOwner(pEnt) != pPlayer) continue;
-
-        DWORD* vtable = *(DWORD**)pEnt;
-        if (vtable == nullptr) continue;
-
-        typedef int(__thiscall* tGetEntityClass)(void* self);
-        typedef int(__thiscall* tGetEntitySubType)(void* self);
-        int entClass = ((tGetEntityClass)vtable[0x18 / 4])(pEnt);
-
-        if (entClass == 1) {
-            // Peep / Droid
-            int speciesId = ((tGetEntitySubType)vtable[0x1C / 4])(pEnt);
+        if ((stateFlags & 0x18) == 0) {
+            // Read species ID directly from Peep struct (+0xDD) â€” zero vtable calls!
+            BYTE speciesId = *(BYTE*)((BYTE*)pEnt + 0xDD);
             if (speciesId >= 1 && speciesId <= 23) {
-                liveAnyPeepCounts[speciesId]++;
+                liveNonHireableCounts[speciesId]++;
 
-                // Byte +0x30D on Peep struct: 0 = Hired Resident / Droid, non-zero = Visitor
                 BYTE visitorFlag = *(BYTE*)((BYTE*)pEnt + 0x30D);
                 bool isResident = (visitorFlag == 0) || (speciesId >= 1 && speciesId <= 4);
                 if (isResident) {
@@ -466,28 +532,37 @@ void EvaluateAutoMaintainRules(void* pPlayer)
                 }
             }
         }
-        else if (entClass == 2) {
-            // Portable / Crate
-            int cargoId = ((tGetEntitySubType)vtable[0x1C / 4])(pEnt);
+        pEnt = IterNext(iterBuf);
+    }
+
+    // 2. Iterate ONLY player's Crates/Portables (entClass = 2)
+    memset(iterBuf, 0, sizeof(iterBuf));
+    IterInit(iterBuf, pPlayer, 2, -1);
+    pEnt = IterNext(iterBuf);
+    while (pEnt != nullptr) {
+        BYTE stateFlags = *(BYTE*)((BYTE*)pEnt + 0x3E);
+        if ((stateFlags & 0x18) == 0) {
+            // Read CargoID directly from Portable struct (+0xDD) â€” zero vtable calls!
+            BYTE cargoId = *(BYTE*)((BYTE*)pEnt + 0xDD);
             if (cargoId >= 1 && cargoId <= 17) {
                 liveCrateCounts[cargoId]++;
             }
         }
+        pEnt = IterNext(iterBuf);
     }
 
     std::lock_guard<std::mutex> lock(g_maintainMutex);
 
-    // Replenish any Peep species below target count (strictly comparing Residents vs Visitors)
     for (int id = 1; id <= 22; id++) {
         const auto& rule = g_peepMaintainRules[id];
         if (!rule.enabled || rule.targetCount <= 0) continue;
 
-        int currentCount = rule.resident ? liveResidentCounts[id] : liveAnyPeepCounts[id];
+        int currentCount = rule.resident ? liveResidentCounts[id] : liveNonHireableCounts[id];
         if (currentCount < rule.targetCount) {
             int deficit = rule.targetCount - currentCount;
             if (deficit > 10) deficit = 10;
             LogMsg("[AUTO-PEEP] ID %d %s count=%d < target=%d -> Spawning %d replacement(s)\n",
-                id, rule.resident ? "RESIDENT" : "VISITOR", currentCount, rule.targetCount, deficit);
+                id, rule.resident ? "RESIDENT" : "NON-HIREABLE", currentCount, rule.targetCount, deficit);
 
             for (int i = 0; i < deficit; i++) {
                 int sx = (rule.localX + (i % 5)) & 0x0F;
@@ -501,7 +576,6 @@ void EvaluateAutoMaintainRules(void* pPlayer)
         }
     }
 
-    // Replenish any Standard Crate below target count
     for (int id = 1; id <= 17; id++) {
         const auto& rule = g_crateMaintainRules[id];
         if (rule.enabled && rule.targetCount > 0 && liveCrateCounts[id] < rule.targetCount) {
@@ -900,14 +974,14 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         CreateWindowA("BUTTON", "Spawn Peep(s) Now (Paced Grid)", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
             22, 246, 425, 32, hwnd, (HMENU)IDC_BTN_PEEP_SPAWN, nullptr, nullptr);
 
-        CreateWindowA("BUTTON", "Maintain Target Count", WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
-            22, 292, 165, 22, hwnd, (HMENU)IDC_CHK_PEEP_MAINTAIN, nullptr, nullptr);
+        CreateWindowA("BUTTON", "Maintain Target (Residents)", WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
+            22, 292, 178, 22, hwnd, (HMENU)IDC_CHK_PEEP_MAINTAIN, nullptr, nullptr);
         CreateWindowA("STATIC", "Target:", WS_CHILD | WS_CLIPSIBLINGS,
-            195, 294, 50, 20, hwnd, (HMENU)IDC_LBL_PEEP_TARGET, nullptr, nullptr);
+            204, 294, 48, 20, hwnd, (HMENU)IDC_LBL_PEEP_TARGET, nullptr, nullptr);
         CreateWindowA("EDIT", "0", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            248, 291, 48, 24, hwnd, (HMENU)IDC_EDIT_PEEP_TARGET, nullptr, nullptr);
+            254, 291, 46, 24, hwnd, (HMENU)IDC_EDIT_PEEP_TARGET, nullptr, nullptr);
         CreateWindowA("BUTTON", "Save Rule", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            306, 290, 141, 26, hwnd, (HMENU)IDC_BTN_PEEP_APPLY_MAINTAIN, nullptr, nullptr);
+            308, 290, 139, 26, hwnd, (HMENU)IDC_BTN_PEEP_APPLY_MAINTAIN, nullptr, nullptr);
 
         CreateWindowA("BUTTON", "Clear All Peep Auto-Maintain Rules", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
             22, 326, 425, 28, hwnd, (HMENU)IDC_BTN_PEEP_CLEAR_MAINTAIN, nullptr, nullptr);
@@ -983,14 +1057,13 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         // --- TAB 4: HELP ---
         CreateWindowA("STATIC",
             "STARTOPIA STANDALONE DLL CHEAT MENU\n\n"
-            "• [INSERT] : Show / Hide this Menu Overlay\n"
-            "• Deck 0 = Sub Deck | Deck 1 = Leisure | Deck 2 = Bio\n"
-            "• Auto-Maintain Rules:\n"
-            "   - Check 'Maintain Target Count', enter Target (0..50), and\n"
-            "     click 'Save Rule' for each Peep or Standard Crate type.\n"
+            "â€¢ [INSERT] : Show / Hide this Menu Overlay\n"
+            "â€¢ Deck 0 = Sub Deck | Deck 1 = Leisure | Deck 2 = Bio\n"
+            "â€¢ Auto-Maintain Rules:\n"
+            "   - Peep Auto-Maintain ALWAYS spawns Residents for hireable\n"
+            "     species (and non-residents only for droids/creatures).\n"
             "   - Every 2.5s the DLL counts your active stock/staff and\n"
-            "     automatically spawns replacements if count < target.\n"
-            "   - Resident vs. Visitor status is tracked separately (+0x30D).",
+            "     automatically spawns replacements if count < target.",
             WS_CHILD | WS_CLIPSIBLINGS, 22, 48, 425, 310, hwnd, (HMENU)IDC_LBL_HELP_TEXT, nullptr, nullptr);
 
         SetChildFont(hwnd);
@@ -1096,8 +1169,9 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
             if (idx >= 0 && idx < PEEP_CATALOG_COUNT) {
                 const auto& entry = g_peepCatalog[idx];
-                bool isResident = entry.canBeResident &&
-                    (SendMessageA(GetDlgItem(hwnd, IDC_CHK_PEEP_RESIDENT), BM_GETCHECK, 0, 0) == BST_CHECKED);
+                // Auto-Maintain ALWAYS spawns Residents for hireable species,
+                // and non-residents ONLY for species that cannot be hired.
+                bool maintainAsResident = entry.canBeResident;
 
                 std::lock_guard<std::mutex> lock(g_maintainMutex);
                 g_peepMaintainRules[entry.id] = {
@@ -1106,13 +1180,14 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     ClampInt(atoi(bufX), 0, 15),
                     ClampInt(atoi(bufY), 0, 31),
                     deck,
-                    isResident,
+                    maintainAsResident,
                     (unsigned char)ClampInt(atoi(bufSkill), 0, 5),
                     (unsigned char)ClampInt(atoi(bufDed), 0, 5),
                     (unsigned char)ClampInt(atoi(bufLoy), 0, 5)
                 };
-                LogMsg("[RULE-PEEP] %s -> Maintain=%s | Target=%d | Res=%d\n",
-                    entry.label, enabled ? "ON" : "OFF", target, isResident ? 1 : 0);
+                LogMsg("[RULE-PEEP] %s -> Maintain=%s | Target=%d | Mode=%s\n",
+                    entry.label, enabled ? "ON" : "OFF", target,
+                    maintainAsResident ? "RESIDENT ONLY" : "NON-HIREABLE");
             }
         }
         else if (id == IDC_BTN_PEEP_CLEAR_MAINTAIN && code == BN_CLICKED) {
