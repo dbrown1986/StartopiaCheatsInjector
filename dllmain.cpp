@@ -1,14 +1,27 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <d3d11.h>
+#include <dxgi.h>
 #include <cstdio>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
+#include <string>
 #include <queue>
 #include <mutex>
 #include "MinHook.h"
 
+// Dear ImGui Headers (External DX11 + Win32 Overlay)
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+#include "imgui_impl_dx11.h"
+
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // ==============================================================================
 // version.dll Proxy Exports (Keeps the host game stable)
@@ -35,6 +48,7 @@
 // Startopia Steam Build Dynamic Offsets (Ghidra Addr - 0x00400000)
 // ==============================================================================
 const DWORD OFFSET_SCRIPT_ADD_ENERGY = 0x001AEEC0; // FUN_005aeec0 (Player Energy Modifier)
+const DWORD OFFSET_DISCOVER_TECH = 0x002A0430; // FUN_006a0430 (Discover Tech / -1 = @alltech)
 const DWORD OFFSET_SPAWN_PEEP_SP = 0x0022E2B0; // FUN_0062e2b0 (Singleplayer Peep Spawner)
 const DWORD OFFSET_SPAWN_PEEP_MP = 0x0022E3D0; // FUN_0062e3d0 (Multiplayer/Alt Peep Spawner)
 const DWORD OFFSET_SPAWN_PORTABLE = 0x0018F9D0; // FUN_0058f9d0 (Portable/Crate Spawner)
@@ -52,6 +66,114 @@ WNDPROC pOriginalGameWndProc = nullptr;
 HWND    g_menuHwnd = nullptr;
 HWND    g_tabHwnd = nullptr;
 HFONT   g_uiFont = nullptr;
+bool    g_menuVisible = true;
+bool    g_alwaysOnTop = true;
+
+// ==============================================================================
+// INI Configuration Settings (Auto-generated if missing)
+// ==============================================================================
+struct ModConfig {
+    bool toggleConsole = false;
+    bool useImGUI = true;
+    int  hotkeyVK = VK_F12;
+    char hotkeyName[32] = "F12";
+    bool outputCrashLog = true;
+    bool showMenuOnStart = true;
+};
+
+ModConfig g_config;
+
+int ParseHotkeyString(const char* rawStr)
+{
+    if (!rawStr || !rawStr[0]) return VK_F12;
+    std::string s;
+    for (const char* p = rawStr; *p; ++p) {
+        if (!isspace((unsigned char)*p)) {
+            s.push_back((char)toupper((unsigned char)*p));
+        }
+    }
+    if (s.empty()) return VK_F12;
+
+    if (s == "F1")  return VK_F1;
+    if (s == "F2")  return VK_F2;
+    if (s == "F3")  return VK_F3;
+    if (s == "F4")  return VK_F4;
+    if (s == "F5")  return VK_F5;
+    if (s == "F6")  return VK_F6;
+    if (s == "F7")  return VK_F7;
+    if (s == "F8")  return VK_F8;
+    if (s == "F9")  return VK_F9;
+    if (s == "F10") return VK_F10;
+    if (s == "F11") return VK_F11;
+    if (s == "F12") return VK_F12;
+    if (s == "INSERT" || s == "INS")    return VK_INSERT;
+    if (s == "DELETE" || s == "DEL")    return VK_DELETE;
+    if (s == "HOME")                    return VK_HOME;
+    if (s == "END")                     return VK_END;
+    if (s == "PAGEUP" || s == "PGUP")   return VK_PRIOR;
+    if (s == "PAGEDOWN" || s == "PGDN") return VK_NEXT;
+    if (s == "TILDE" || s == "~" || s == "`") return VK_OEM_3;
+    if (s == "TAB")                     return VK_TAB;
+    if (s == "PAUSE")                   return VK_PAUSE;
+
+    if (s.size() == 1 && isalnum((unsigned char)s[0])) {
+        return (int)s[0];
+    }
+    if (s.rfind("0X", 0) == 0) {
+        int val = (int)strtol(s.c_str(), nullptr, 16);
+        if (val > 0 && val < 256) return val;
+    }
+    return VK_F12;
+}
+
+bool ParseIniBool(const char* val, bool defaultVal)
+{
+    if (!val || !val[0]) return defaultVal;
+    if (_stricmp(val, "true") == 0 || strcmp(val, "1") == 0 || _stricmp(val, "yes") == 0) return true;
+    if (_stricmp(val, "false") == 0 || strcmp(val, "0") == 0 || _stricmp(val, "no") == 0) return false;
+    return defaultVal;
+}
+
+void LoadOrCreateIniConfig()
+{
+    char iniPath[MAX_PATH]{};
+    GetFullPathNameA("StartopiaCheeseburger.ini", MAX_PATH, iniPath, nullptr);
+
+    DWORD attrs = GetFileAttributesA(iniPath);
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        FILE* f = nullptr;
+        if (fopen_s(&f, iniPath, "w") == 0 && f != nullptr) {
+            fprintf(f,
+                "; Startopia Cheeseburger Menu Configuration\n"
+                "[General]\n"
+                "ToggleConsole=false\n"
+                "UseImGUI=true\n"
+                "Hotkey=F12\n"
+                "OutputCrashLog=true\n"
+                "ShowMenuOnStart=true\n");
+            fclose(f);
+        }
+    }
+
+    char buf[64]{};
+    GetPrivateProfileStringA("General", "ToggleConsole", "false", buf, sizeof(buf), iniPath);
+    g_config.toggleConsole = ParseIniBool(buf, false);
+
+    GetPrivateProfileStringA("General", "UseImGUI", "true", buf, sizeof(buf), iniPath);
+    g_config.useImGUI = ParseIniBool(buf, true);
+
+    GetPrivateProfileStringA("General", "Hotkey", "F12", buf, sizeof(buf), iniPath);
+    strncpy_s(g_config.hotkeyName, buf, sizeof(g_config.hotkeyName) - 1);
+    g_config.hotkeyVK = ParseHotkeyString(buf);
+
+    GetPrivateProfileStringA("General", "OutputCrashLog", "true", buf, sizeof(buf), iniPath);
+    g_config.outputCrashLog = ParseIniBool(buf, true);
+
+    GetPrivateProfileStringA("General", "ShowMenuOnStart", "true", buf, sizeof(buf), iniPath);
+    g_config.showMenuOnStart = ParseIniBool(buf, true);
+
+    g_menuVisible = g_config.showMenuOnStart;
+}
 
 // ==============================================================================
 // Verified Crate, Room Hard-Plan, Furniture Plan & Peep Catalogs (Alphabetical)
@@ -211,7 +333,7 @@ static const PeepCatalogEntry g_peepCatalog[] = {
 static const int PEEP_CATALOG_COUNT = sizeof(g_peepCatalog) / sizeof(g_peepCatalog[0]);
 
 // ==============================================================================
-// Auto-Maintain Rules State (Thread-Safe, Stepped in Increments of 10 up to 999)
+// Auto-Maintain Rules State (Thread-Safe, Stepped in Increments of 1, 5, 10 up to 999)
 // ==============================================================================
 struct PeepMaintainRule {
     bool enabled;
@@ -259,6 +381,7 @@ struct PeepAttributesFull {
 // ==============================================================================
 enum CommandType {
     CMD_ADD_ENERGY,
+    CMD_UNLOCK_ALL_TECH,
     CMD_SPAWN_PEEP,
     CMD_SPAWN_CRATE
 };
@@ -291,6 +414,10 @@ void EnqueueCommand(const ModCommand& cmd)
 // ==============================================================================
 void LogMsg(const char* fmt, ...)
 {
+    if (!g_config.toggleConsole && (!g_config.outputCrashLog || g_logFile == nullptr)) {
+        return;
+    }
+
     SYSTEMTIME st{};
     GetLocalTime(&st);
 
@@ -306,8 +433,10 @@ void LogMsg(const char* fmt, ...)
         st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
         msgBuf);
 
-    printf("%s", finalBuf);
-    if (g_logFile) {
+    if (g_config.toggleConsole) {
+        printf("%s", finalBuf);
+    }
+    if (g_config.outputCrashLog && g_logFile) {
         fprintf(g_logFile, "%s", finalBuf);
         fflush(g_logFile);
     }
@@ -335,9 +464,26 @@ LONG WINAPI GlobalVectoredCrashHandler(PEXCEPTION_POINTERS ep)
 }
 
 // ==============================================================================
+// Window Always-On-Top Helper (Shared by ImGui and Classic Win32 UI)
+// ==============================================================================
+void ApplyMenuAlwaysOnTop(bool alwaysOnTop)
+{
+    g_alwaysOnTop = alwaysOnTop;
+    if (g_menuHwnd != nullptr) {
+        SetWindowPos(
+            g_menuHwnd,
+            g_alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
+            0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+        );
+    }
+}
+
+// ==============================================================================
 // Engine Function Typedefs & Execution Helpers
 // ==============================================================================
 typedef unsigned int(__fastcall* tScriptAddEnergy)(void* pPlayer, int amount);
+typedef void(__fastcall* tDiscoverTech)(void* pPlayer, unsigned int techId);
 typedef int(__fastcall* tGetPlayerSector)(void* pPlayer, int unusedDeck);
 typedef unsigned int* (__thiscall* tPackCoords)(unsigned int* outPacked, char x, unsigned int z, unsigned int deck);
 typedef unsigned int(__fastcall* tSpawnPeepSP)(int mode, unsigned int* pPackedCoords, unsigned int peepType, unsigned short angle, void* pPlayer, void* pAttr);
@@ -368,6 +514,13 @@ void ExecuteAddEnergy(void* pPlayer, int amount)
     auto ScriptAddEnergy = (tScriptAddEnergy)(g_baseAddress + OFFSET_SCRIPT_ADD_ENERGY);
     LogMsg("[EXEC-ENERGY] Modifying player energy by %+d (pPlayer=0x%p)\n", amount, pPlayer);
     ScriptAddEnergy(pPlayer, amount);
+}
+
+void ExecuteUnlockAllTech(void* pPlayer)
+{
+    auto DiscoverTech = (tDiscoverTech)(g_baseAddress + OFFSET_DISCOVER_TECH);
+    LogMsg("[EXEC-TECH] Discovering @alltech (0xFFFFFFFF) for pPlayer=0x%p\n", pPlayer);
+    DiscoverTech(pPlayer, 0xFFFFFFFF);
 }
 
 void ExecuteSpawnPeep(const ModCommand& cmd, void* pPlayer)
@@ -460,7 +613,6 @@ void ScanEntityCountsPureMemory(void* pPlayer, int* liveResidentCounts, int* liv
     DWORD* entitySlots = (DWORD*)(g_baseAddress + OFFSET_ENTITY_TABLE);
 
     __try {
-        // 1. Walk pPlayer's exact Peep/Droid linked list (entClass = 1)
         USHORT slotIdx = *(USHORT*)((BYTE*)pPlayer + (1 + 0x22D) * 10);
         int safetyGuard = 0;
 
@@ -487,7 +639,6 @@ void ScanEntityCountsPureMemory(void* pPlayer, int* liveResidentCounts, int* liv
             slotIdx = nextSlot;
         }
 
-        // 2. Walk pPlayer's exact Crate/Portable linked list (entClass = 2)
         slotIdx = *(USHORT*)((BYTE*)pPlayer + (2 + 0x22D) * 10);
         safetyGuard = 0;
 
@@ -509,7 +660,6 @@ void ScanEntityCountsPureMemory(void* pPlayer, int* liveResidentCounts, int* liv
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Silently skip tick if linked list updates mid-frame
     }
 }
 
@@ -555,7 +705,7 @@ void EvaluateAutoMaintainRules(void* pPlayer)
         int currentCount = rule.resident ? liveResidentCounts[id] : liveNonHireableCounts[id];
         if (currentCount < rule.targetCount) {
             int deficit = rule.targetCount - currentCount;
-            if (deficit > 10) deficit = 10; // Paced in waves of 10 per 2.5s tick
+            if (deficit > 10) deficit = 10;
             LogMsg("[AUTO-PEEP] ID %d %s count=%d < target=%d -> Spawning %d replacement(s)\n",
                 id, rule.resident ? "RESIDENT" : "NON-HIREABLE", currentCount, rule.targetCount, deficit);
 
@@ -575,7 +725,7 @@ void EvaluateAutoMaintainRules(void* pPlayer)
         const auto& rule = g_crateMaintainRules[id];
         if (rule.enabled && rule.targetCount > 0 && liveCrateCounts[id] < rule.targetCount) {
             int deficit = rule.targetCount - liveCrateCounts[id];
-            if (deficit > 10) deficit = 10; // Paced in waves of 10 per 2.5s tick
+            if (deficit > 10) deficit = 10;
             LogMsg("[AUTO-CRATE] CargoID %d count=%d < target=%d -> Spawning %d replacement(s)\n",
                 id, liveCrateCounts[id], rule.targetCount, deficit);
 
@@ -626,6 +776,9 @@ void ProcessCommandQueueOnMainThread()
         case CMD_ADD_ENERGY:
             ExecuteAddEnergy(pPlayer, cmd.amount);
             break;
+        case CMD_UNLOCK_ALL_TECH:
+            ExecuteUnlockAllTech(pPlayer);
+            break;
         case CMD_SPAWN_PEEP:
             ExecuteSpawnPeep(cmd, pPlayer);
             break;
@@ -662,7 +815,9 @@ HWND FindStartopiaMainWindow()
         if (pid == currentPid && hwnd != g_menuHwnd && IsWindowVisible(hwnd)) {
             char cls[128]{};
             GetClassNameA(hwnd, cls, sizeof(cls));
-            if (strcmp(cls, "ConsoleWindowClass") != 0 && strcmp(cls, "StartopiaStandaloneCheatMenu") != 0) {
+            if (strcmp(cls, "ConsoleWindowClass") != 0 &&
+                strcmp(cls, "StartopiaStandaloneCheatMenu") != 0 &&
+                strcmp(cls, "StartopiaImGuiCheeseburgerMenu") != 0) {
                 return hwnd;
             }
         }
@@ -670,13 +825,21 @@ HWND FindStartopiaMainWindow()
     return nullptr;
 }
 
+int ClampInt(int val, int minVal, int maxVal)
+{
+    if (val < minVal) return minVal;
+    if (val > maxVal) return maxVal;
+    return val;
+}
+
 // ==============================================================================
-// Tabbed Win32 Overlay Menu Controls
+// Classic Win32 GDI Menu Controls (Used when UseImGUI=false)
 // ==============================================================================
 enum MenuControlIDs {
+    IDC_CHK_ALWAYS_ON_TOP = 99,
     IDC_MAIN_TAB = 100,
 
-    // Tab 0: Energy
+    // Tab 0: Energy/Tech
     IDC_BTN_NRG_ADD_50K = 1001,
     IDC_BTN_NRG_ADD_500K,
     IDC_BTN_NRG_SUB_50K,
@@ -684,6 +847,8 @@ enum MenuControlIDs {
     IDC_BTN_NRG_APPLY_CUSTOM,
     IDC_LBL_NRG_1,
     IDC_LBL_NRG_2,
+    IDC_BTN_NRG_UNLOCK_ALL_TECH,
+    IDC_LBL_NRG_TECH_NOTE,
 
     // Tab 1: Peeps
     IDC_LBL_PEEP_TYPE = 2001,
@@ -708,6 +873,10 @@ enum MenuControlIDs {
     IDC_LBL_PEEP_TARGET,
     IDC_EDIT_PEEP_TARGET,
     IDC_BTN_PEEP_SUB_10,
+    IDC_BTN_PEEP_SUB_5,
+    IDC_BTN_PEEP_SUB_1,
+    IDC_BTN_PEEP_ADD_1,
+    IDC_BTN_PEEP_ADD_5,
     IDC_BTN_PEEP_ADD_10,
     IDC_BTN_PEEP_CLEAR_MAINTAIN,
 
@@ -730,6 +899,10 @@ enum MenuControlIDs {
     IDC_LBL_CRATE_TARGET,
     IDC_EDIT_CRATE_TARGET,
     IDC_BTN_CRATE_SUB_10,
+    IDC_BTN_CRATE_SUB_5,
+    IDC_BTN_CRATE_SUB_1,
+    IDC_BTN_CRATE_ADD_1,
+    IDC_BTN_CRATE_ADD_5,
     IDC_BTN_CRATE_ADD_10,
     IDC_BTN_CRATE_CLEAR_MAINTAIN,
 
@@ -739,16 +912,9 @@ enum MenuControlIDs {
     IDC_CHK_BUILD_UNLOCK_ALL,
     IDC_LBL_BUILD_NOTE,
 
-    // Tab 4: Help
+    // Tab 4: Help/About
     IDC_LBL_HELP_TEXT = 5001
 };
-
-int ClampInt(int val, int minVal, int maxVal)
-{
-    if (val < minVal) return minVal;
-    if (val > maxVal) return maxVal;
-    return val;
-}
 
 void SetChildFont(HWND hParent)
 {
@@ -772,11 +938,11 @@ void SwitchMenuTab(int tabIndex)
         }
         };
 
-    ShowRange(1001, 1020, tabIndex == 0); // Energy
-    ShowRange(2001, 2035, tabIndex == 1); // Peeps
-    ShowRange(3001, 3035, tabIndex == 2); // Crates
-    ShowRange(4001, 4020, tabIndex == 3); // Build Changers
-    ShowRange(5001, 5020, tabIndex == 4); // Help
+    ShowRange(1001, 1020, tabIndex == 0);
+    ShowRange(2001, 2040, tabIndex == 1);
+    ShowRange(3001, 3040, tabIndex == 2);
+    ShowRange(4001, 4020, tabIndex == 3);
+    ShowRange(5001, 5020, tabIndex == 4);
 }
 
 void SyncPeepControlsForSelection()
@@ -853,22 +1019,22 @@ void SyncCrateControlsForSelection()
         EnableWindow(hComboSub, TRUE);
     }
 
-    HWND hChkMaint = GetDlgItem(g_menuHwnd, IDC_CHK_CRATE_MAINTAIN);
-    HWND hEditTarget = GetDlgItem(g_menuHwnd, IDC_EDIT_CRATE_TARGET);
-    HWND hBtnSub10 = GetDlgItem(g_menuHwnd, IDC_BTN_CRATE_SUB_10);
-    HWND hBtnAdd10 = GetDlgItem(g_menuHwnd, IDC_BTN_CRATE_ADD_10);
-
-    EnableWindow(hChkMaint, entry.canMaintain ? TRUE : FALSE);
-    EnableWindow(hEditTarget, entry.canMaintain ? TRUE : FALSE);
-    EnableWindow(hBtnSub10, entry.canMaintain ? TRUE : FALSE);
-    EnableWindow(hBtnAdd10, entry.canMaintain ? TRUE : FALSE);
+    BOOL canMaint = entry.canMaintain ? TRUE : FALSE;
+    EnableWindow(GetDlgItem(g_menuHwnd, IDC_CHK_CRATE_MAINTAIN), canMaint);
+    EnableWindow(GetDlgItem(g_menuHwnd, IDC_EDIT_CRATE_TARGET), canMaint);
+    EnableWindow(GetDlgItem(g_menuHwnd, IDC_BTN_CRATE_SUB_10), canMaint);
+    EnableWindow(GetDlgItem(g_menuHwnd, IDC_BTN_CRATE_SUB_5), canMaint);
+    EnableWindow(GetDlgItem(g_menuHwnd, IDC_BTN_CRATE_SUB_1), canMaint);
+    EnableWindow(GetDlgItem(g_menuHwnd, IDC_BTN_CRATE_ADD_1), canMaint);
+    EnableWindow(GetDlgItem(g_menuHwnd, IDC_BTN_CRATE_ADD_5), canMaint);
+    EnableWindow(GetDlgItem(g_menuHwnd, IDC_BTN_CRATE_ADD_10), canMaint);
 
     std::lock_guard<std::mutex> lock(g_maintainMutex);
     const auto& rule = g_crateMaintainRules[entry.id];
-    SendMessageA(hChkMaint, BM_SETCHECK, (entry.canMaintain && rule.enabled) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(GetDlgItem(g_menuHwnd, IDC_CHK_CRATE_MAINTAIN), BM_SETCHECK, (entry.canMaintain && rule.enabled) ? BST_CHECKED : BST_UNCHECKED, 0);
     char buf[16];
     sprintf_s(buf, "%d", entry.canMaintain ? rule.targetCount : 0);
-    SetWindowTextA(hEditTarget, buf);
+    SetWindowTextA(GetDlgItem(g_menuHwnd, IDC_EDIT_CRATE_TARGET), buf);
 }
 
 void UpdatePeepMaintainRuleStep(HWND hwnd, int deltaStep, bool toggleOnly)
@@ -966,7 +1132,7 @@ void UpdateCrateMaintainRuleStep(HWND hwnd, int deltaStep, bool toggleOnly)
         entry.label, rule.enabled ? "ON" : "OFF", newTarget);
 }
 
-LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+LRESULT CALLBACK ClassicMenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
     case WM_CREATE: {
@@ -977,16 +1143,22 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
 
+        // "Always on top" checkbox positioned above the tab bar
+        HWND hChkTop = CreateWindowA("BUTTON", "Always on top",
+            WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE | BS_AUTOCHECKBOX,
+            12, 6, 150, 22, hwnd, (HMENU)IDC_CHK_ALWAYS_ON_TOP, nullptr, nullptr);
+        SendMessageA(hChkTop, BM_SETCHECK, g_alwaysOnTop ? BST_CHECKED : BST_UNCHECKED, 0);
+
         g_tabHwnd = CreateWindowExA(0, WC_TABCONTROLA, "",
             WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE,
-            8, 8, 455, 420, hwnd, (HMENU)IDC_MAIN_TAB, nullptr, nullptr);
+            8, 32, 455, 422, hwnd, (HMENU)IDC_MAIN_TAB, nullptr, nullptr);
 
         const char* tabNames[] = {
-            "Energy",
+            "Energy/Tech",
             "Peeps",
             "Crates",
             "Build Changers",
-            "Help"
+            "Help/About"
         };
         for (int i = 0; i < 5; i++) {
             TCITEMA tie{};
@@ -995,176 +1167,201 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             TabCtrl_InsertItem(g_tabHwnd, i, &tie);
         }
 
-        // --- TAB 0: Energy ---
+        // --- TAB 0: Energy/Tech ---
         CreateWindowA("STATIC", "Direct Wallet Energy Controls (No Script Needed):", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 48, 420, 20, hwnd, (HMENU)IDC_LBL_NRG_1, nullptr, nullptr);
+            22, 72, 420, 20, hwnd, (HMENU)IDC_LBL_NRG_1, nullptr, nullptr);
         CreateWindowA("BUTTON", "+50,000 Energy", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            22, 76, 132, 32, hwnd, (HMENU)IDC_BTN_NRG_ADD_50K, nullptr, nullptr);
+            22, 100, 132, 32, hwnd, (HMENU)IDC_BTN_NRG_ADD_50K, nullptr, nullptr);
         CreateWindowA("BUTTON", "+500,000 Energy", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            164, 76, 140, 32, hwnd, (HMENU)IDC_BTN_NRG_ADD_500K, nullptr, nullptr);
+            164, 100, 140, 32, hwnd, (HMENU)IDC_BTN_NRG_ADD_500K, nullptr, nullptr);
         CreateWindowA("BUTTON", "-50,000 Energy", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            314, 76, 132, 32, hwnd, (HMENU)IDC_BTN_NRG_SUB_50K, nullptr, nullptr);
+            314, 100, 132, 32, hwnd, (HMENU)IDC_BTN_NRG_SUB_50K, nullptr, nullptr);
 
         CreateWindowA("STATIC", "Custom Energy Amount (Positive or Negative):", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 125, 420, 20, hwnd, (HMENU)IDC_LBL_NRG_2, nullptr, nullptr);
+            22, 149, 420, 20, hwnd, (HMENU)IDC_LBL_NRG_2, nullptr, nullptr);
         CreateWindowA("EDIT", "100000", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_AUTOHSCROLL,
-            22, 150, 215, 26, hwnd, (HMENU)IDC_EDIT_NRG_CUSTOM, nullptr, nullptr);
+            22, 174, 215, 26, hwnd, (HMENU)IDC_EDIT_NRG_CUSTOM, nullptr, nullptr);
         CreateWindowA("BUTTON", "Apply Energy", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            247, 148, 199, 30, hwnd, (HMENU)IDC_BTN_NRG_APPLY_CUSTOM, nullptr, nullptr);
+            247, 172, 199, 30, hwnd, (HMENU)IDC_BTN_NRG_APPLY_CUSTOM, nullptr, nullptr);
+
+        CreateWindowA("BUTTON", "Unlock all tech", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            22, 222, 424, 34, hwnd, (HMENU)IDC_BTN_NRG_UNLOCK_ALL_TECH, nullptr, nullptr);
+        CreateWindowA("STATIC",
+            "Discovers @alltech (all theories & blueprints). Note: Avoid using\n"
+            "during the Turakken research mission unless you want an instant win.",
+            WS_CHILD | WS_CLIPSIBLINGS, 22, 264, 424, 36, hwnd, (HMENU)IDC_LBL_NRG_TECH_NOTE, nullptr, nullptr);
 
         // --- TAB 1: Peeps ---
         CreateWindowA("STATIC", "Peep / Droid Species:", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 46, 425, 18, hwnd, (HMENU)IDC_LBL_PEEP_TYPE, nullptr, nullptr);
+            22, 70, 425, 18, hwnd, (HMENU)IDC_LBL_PEEP_TYPE, nullptr, nullptr);
         HWND hComboPeep = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_CLIPSIBLINGS | CBS_DROPDOWNLIST | WS_VSCROLL,
-            22, 66, 425, 280, hwnd, (HMENU)IDC_COMBO_PEEP_TYPE, nullptr, nullptr);
+            22, 90, 425, 280, hwnd, (HMENU)IDC_COMBO_PEEP_TYPE, nullptr, nullptr);
         for (int i = 0; i < PEEP_CATALOG_COUNT; i++) {
             SendMessageA(hComboPeep, CB_ADDSTRING, 0, (LPARAM)g_peepCatalog[i].label);
         }
-        SendMessageA(hComboPeep, CB_SETCURSEL, 9, 0); // Default to Salt Hog
+        SendMessageA(hComboPeep, CB_SETCURSEL, 9, 0);
 
         CreateWindowA("STATIC", "Target Deck:", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 98, 425, 18, hwnd, (HMENU)IDC_LBL_PEEP_DECK, nullptr, nullptr);
+            22, 122, 425, 18, hwnd, (HMENU)IDC_LBL_PEEP_DECK, nullptr, nullptr);
         HWND hComboPeepDeck = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_CLIPSIBLINGS | CBS_DROPDOWNLIST,
-            22, 118, 425, 120, hwnd, (HMENU)IDC_COMBO_PEEP_DECK, nullptr, nullptr);
+            22, 142, 425, 120, hwnd, (HMENU)IDC_COMBO_PEEP_DECK, nullptr, nullptr);
         SendMessageA(hComboPeepDeck, CB_ADDSTRING, 0, (LPARAM)"Deck 0 - Sub Deck (Engineering / Cargo)");
         SendMessageA(hComboPeepDeck, CB_ADDSTRING, 0, (LPARAM)"Deck 1 - Leisure Deck");
         SendMessageA(hComboPeepDeck, CB_ADDSTRING, 0, (LPARAM)"Deck 2 - Bio Deck");
         SendMessageA(hComboPeepDeck, CB_SETCURSEL, 0, 0);
 
         CreateWindowA("STATIC", "Tile X:", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 152, 48, 20, hwnd, (HMENU)IDC_LBL_PEEP_X, nullptr, nullptr);
+            22, 176, 48, 20, hwnd, (HMENU)IDC_LBL_PEEP_X, nullptr, nullptr);
         CreateWindowA("EDIT", "6", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            72, 149, 55, 24, hwnd, (HMENU)IDC_EDIT_PEEP_X, nullptr, nullptr);
+            72, 173, 55, 24, hwnd, (HMENU)IDC_EDIT_PEEP_X, nullptr, nullptr);
 
         CreateWindowA("STATIC", "Tile Y:", WS_CHILD | WS_CLIPSIBLINGS,
-            142, 152, 48, 20, hwnd, (HMENU)IDC_LBL_PEEP_Y, nullptr, nullptr);
+            142, 176, 48, 20, hwnd, (HMENU)IDC_LBL_PEEP_Y, nullptr, nullptr);
         CreateWindowA("EDIT", "6", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            192, 149, 55, 24, hwnd, (HMENU)IDC_EDIT_PEEP_Y, nullptr, nullptr);
+            192, 173, 55, 24, hwnd, (HMENU)IDC_EDIT_PEEP_Y, nullptr, nullptr);
 
         CreateWindowA("STATIC", "Qty (1-50):", WS_CHILD | WS_CLIPSIBLINGS,
-            262, 152, 72, 20, hwnd, (HMENU)IDC_LBL_PEEP_QTY, nullptr, nullptr);
+            262, 176, 72, 20, hwnd, (HMENU)IDC_LBL_PEEP_QTY, nullptr, nullptr);
         CreateWindowA("EDIT", "1", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            338, 149, 57, 24, hwnd, (HMENU)IDC_EDIT_PEEP_QTY, nullptr, nullptr);
+            338, 173, 57, 24, hwnd, (HMENU)IDC_EDIT_PEEP_QTY, nullptr, nullptr);
 
         HWND hChkRes = CreateWindowA("BUTTON", "Resident (Hired Staff)", WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
-            22, 184, 210, 22, hwnd, (HMENU)IDC_CHK_PEEP_RESIDENT, nullptr, nullptr);
+            22, 208, 210, 22, hwnd, (HMENU)IDC_CHK_PEEP_RESIDENT, nullptr, nullptr);
         SendMessageA(hChkRes, BM_SETCHECK, BST_CHECKED, 0);
 
         CreateWindowA("STATIC", "Skill (0-5):", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 214, 72, 20, hwnd, (HMENU)IDC_LBL_PEEP_SKILL, nullptr, nullptr);
+            22, 238, 72, 20, hwnd, (HMENU)IDC_LBL_PEEP_SKILL, nullptr, nullptr);
         CreateWindowA("EDIT", "5", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            96, 211, 42, 24, hwnd, (HMENU)IDC_EDIT_PEEP_SKILL, nullptr, nullptr);
+            96, 235, 42, 24, hwnd, (HMENU)IDC_EDIT_PEEP_SKILL, nullptr, nullptr);
 
         CreateWindowA("STATIC", "Dedication (0-5):", WS_CHILD | WS_CLIPSIBLINGS,
-            150, 214, 108, 20, hwnd, (HMENU)IDC_LBL_PEEP_DEDICATION, nullptr, nullptr);
+            150, 238, 108, 20, hwnd, (HMENU)IDC_LBL_PEEP_DEDICATION, nullptr, nullptr);
         CreateWindowA("EDIT", "5", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            260, 211, 42, 24, hwnd, (HMENU)IDC_EDIT_PEEP_DEDICATION, nullptr, nullptr);
+            260, 235, 42, 24, hwnd, (HMENU)IDC_EDIT_PEEP_DEDICATION, nullptr, nullptr);
 
         CreateWindowA("STATIC", "Loyalty (0-5):", WS_CHILD | WS_CLIPSIBLINGS,
-            314, 214, 82, 20, hwnd, (HMENU)IDC_LBL_PEEP_LOYALTY, nullptr, nullptr);
+            314, 238, 82, 20, hwnd, (HMENU)IDC_LBL_PEEP_LOYALTY, nullptr, nullptr);
         CreateWindowA("EDIT", "5", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            396, 211, 51, 24, hwnd, (HMENU)IDC_EDIT_PEEP_LOYALTY, nullptr, nullptr);
+            396, 235, 51, 24, hwnd, (HMENU)IDC_EDIT_PEEP_LOYALTY, nullptr, nullptr);
 
         CreateWindowA("BUTTON", "Spawn Peep(s) Now (Paced Grid)", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            22, 246, 425, 32, hwnd, (HMENU)IDC_BTN_PEEP_SPAWN, nullptr, nullptr);
+            22, 268, 425, 30, hwnd, (HMENU)IDC_BTN_PEEP_SPAWN, nullptr, nullptr);
 
-        // Stepped (+10 / -10) Auto-Maintain Controls for Peeps (0..999)
         CreateWindowA("BUTTON", "Maintain Target", WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
-            22, 292, 128, 22, hwnd, (HMENU)IDC_CHK_PEEP_MAINTAIN, nullptr, nullptr);
+            22, 306, 128, 22, hwnd, (HMENU)IDC_CHK_PEEP_MAINTAIN, nullptr, nullptr);
         CreateWindowA("STATIC", "Target:", WS_CHILD | WS_CLIPSIBLINGS,
-            156, 294, 48, 20, hwnd, (HMENU)IDC_LBL_PEEP_TARGET, nullptr, nullptr);
+            156, 308, 48, 20, hwnd, (HMENU)IDC_LBL_PEEP_TARGET, nullptr, nullptr);
         CreateWindowA("EDIT", "0", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_READONLY | ES_CENTER,
-            206, 291, 48, 24, hwnd, (HMENU)IDC_EDIT_PEEP_TARGET, nullptr, nullptr);
+            206, 305, 48, 24, hwnd, (HMENU)IDC_EDIT_PEEP_TARGET, nullptr, nullptr);
+
         CreateWindowA("BUTTON", "-10", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            262, 290, 88, 26, hwnd, (HMENU)IDC_BTN_PEEP_SUB_10, nullptr, nullptr);
+            22, 334, 67, 25, hwnd, (HMENU)IDC_BTN_PEEP_SUB_10, nullptr, nullptr);
+        CreateWindowA("BUTTON", "-5", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            93, 334, 67, 25, hwnd, (HMENU)IDC_BTN_PEEP_SUB_5, nullptr, nullptr);
+        CreateWindowA("BUTTON", "-1", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            164, 334, 67, 25, hwnd, (HMENU)IDC_BTN_PEEP_SUB_1, nullptr, nullptr);
+        CreateWindowA("BUTTON", "+1", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            238, 334, 67, 25, hwnd, (HMENU)IDC_BTN_PEEP_ADD_1, nullptr, nullptr);
+        CreateWindowA("BUTTON", "+5", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            309, 334, 67, 25, hwnd, (HMENU)IDC_BTN_PEEP_ADD_5, nullptr, nullptr);
         CreateWindowA("BUTTON", "+10", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            358, 290, 89, 26, hwnd, (HMENU)IDC_BTN_PEEP_ADD_10, nullptr, nullptr);
+            380, 334, 67, 25, hwnd, (HMENU)IDC_BTN_PEEP_ADD_10, nullptr, nullptr);
 
         CreateWindowA("BUTTON", "Clear All Peep Auto-Maintain Rules", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            22, 326, 425, 28, hwnd, (HMENU)IDC_BTN_PEEP_CLEAR_MAINTAIN, nullptr, nullptr);
+            22, 366, 425, 26, hwnd, (HMENU)IDC_BTN_PEEP_CLEAR_MAINTAIN, nullptr, nullptr);
 
         // --- TAB 2: Crates ---
         CreateWindowA("STATIC", "Crate / Portable Type (Alphabetical):", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 46, 425, 18, hwnd, (HMENU)IDC_LBL_CRATE_TYPE, nullptr, nullptr);
+            22, 70, 425, 18, hwnd, (HMENU)IDC_LBL_CRATE_TYPE, nullptr, nullptr);
         HWND hComboCrate = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_CLIPSIBLINGS | CBS_DROPDOWNLIST | WS_VSCROLL,
-            22, 66, 425, 280, hwnd, (HMENU)IDC_COMBO_CRATE_TYPE, nullptr, nullptr);
+            22, 90, 425, 280, hwnd, (HMENU)IDC_COMBO_CRATE_TYPE, nullptr, nullptr);
         for (int i = 0; i < CRATE_CATALOG_COUNT; i++) {
             SendMessageA(hComboCrate, CB_ADDSTRING, 0, (LPARAM)g_crateCatalog[i].label);
         }
-        SendMessageA(hComboCrate, CB_SETCURSEL, 5, 0); // Default to Food Crate
+        SendMessageA(hComboCrate, CB_SETCURSEL, 5, 0);
 
         CreateWindowA("STATIC", "Crate Sub-Type (Hardplan, Furniture, Droid, Tech):", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 98, 425, 18, hwnd, (HMENU)IDC_LBL_CRATE_SUBTYPE, nullptr, nullptr);
+            22, 122, 425, 18, hwnd, (HMENU)IDC_LBL_CRATE_SUBTYPE, nullptr, nullptr);
         CreateWindowA("COMBOBOX", "", WS_CHILD | WS_CLIPSIBLINGS | CBS_DROPDOWNLIST | WS_VSCROLL,
-            22, 118, 425, 280, hwnd, (HMENU)IDC_COMBO_CRATE_SUBTYPE, nullptr, nullptr);
+            22, 142, 425, 280, hwnd, (HMENU)IDC_COMBO_CRATE_SUBTYPE, nullptr, nullptr);
 
         CreateWindowA("STATIC", "Target Deck:", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 150, 425, 18, hwnd, (HMENU)IDC_LBL_CRATE_DECK, nullptr, nullptr);
+            22, 174, 425, 18, hwnd, (HMENU)IDC_LBL_CRATE_DECK, nullptr, nullptr);
         HWND hComboCrateDeck = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_CLIPSIBLINGS | CBS_DROPDOWNLIST,
-            22, 170, 425, 120, hwnd, (HMENU)IDC_COMBO_CRATE_DECK, nullptr, nullptr);
+            22, 194, 425, 120, hwnd, (HMENU)IDC_COMBO_CRATE_DECK, nullptr, nullptr);
         SendMessageA(hComboCrateDeck, CB_ADDSTRING, 0, (LPARAM)"Deck 0 - Sub Deck (Engineering / Cargo)");
         SendMessageA(hComboCrateDeck, CB_ADDSTRING, 0, (LPARAM)"Deck 1 - Leisure Deck");
         SendMessageA(hComboCrateDeck, CB_ADDSTRING, 0, (LPARAM)"Deck 2 - Bio Deck");
         SendMessageA(hComboCrateDeck, CB_SETCURSEL, 0, 0);
 
         CreateWindowA("STATIC", "Tile X:", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 206, 48, 20, hwnd, (HMENU)IDC_LBL_CRATE_X, nullptr, nullptr);
+            22, 230, 48, 20, hwnd, (HMENU)IDC_LBL_CRATE_X, nullptr, nullptr);
         CreateWindowA("EDIT", "8", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            72, 203, 55, 24, hwnd, (HMENU)IDC_EDIT_CRATE_X, nullptr, nullptr);
+            72, 227, 55, 24, hwnd, (HMENU)IDC_EDIT_CRATE_X, nullptr, nullptr);
 
         CreateWindowA("STATIC", "Tile Y:", WS_CHILD | WS_CLIPSIBLINGS,
-            142, 206, 48, 20, hwnd, (HMENU)IDC_LBL_CRATE_Y, nullptr, nullptr);
+            142, 230, 48, 20, hwnd, (HMENU)IDC_LBL_CRATE_Y, nullptr, nullptr);
         CreateWindowA("EDIT", "6", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            192, 203, 55, 24, hwnd, (HMENU)IDC_EDIT_CRATE_Y, nullptr, nullptr);
+            192, 227, 55, 24, hwnd, (HMENU)IDC_EDIT_CRATE_Y, nullptr, nullptr);
 
         CreateWindowA("STATIC", "Qty (1-50):", WS_CHILD | WS_CLIPSIBLINGS,
-            262, 206, 72, 20, hwnd, (HMENU)IDC_LBL_CRATE_QTY, nullptr, nullptr);
+            262, 230, 72, 20, hwnd, (HMENU)IDC_LBL_CRATE_QTY, nullptr, nullptr);
         CreateWindowA("EDIT", "1", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_NUMBER,
-            338, 203, 57, 24, hwnd, (HMENU)IDC_EDIT_CRATE_QTY, nullptr, nullptr);
+            338, 227, 57, 24, hwnd, (HMENU)IDC_EDIT_CRATE_QTY, nullptr, nullptr);
 
         CreateWindowA("BUTTON", "Spawn Crate(s) Now", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            22, 238, 205, 32, hwnd, (HMENU)IDC_BTN_CRATE_SPAWN, nullptr, nullptr);
+            22, 260, 205, 30, hwnd, (HMENU)IDC_BTN_CRATE_SPAWN, nullptr, nullptr);
         CreateWindowA("BUTTON", "Spawn All 17 Types", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            237, 238, 210, 32, hwnd, (HMENU)IDC_BTN_CRATE_SPAWN_ALL_STD, nullptr, nullptr);
+            237, 260, 210, 30, hwnd, (HMENU)IDC_BTN_CRATE_SPAWN_ALL_STD, nullptr, nullptr);
 
-        // Stepped (+10 / -10) Auto-Maintain Controls for Crates (0..999)
         CreateWindowA("BUTTON", "Maintain Target", WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
-            22, 284, 128, 22, hwnd, (HMENU)IDC_CHK_CRATE_MAINTAIN, nullptr, nullptr);
+            22, 298, 128, 22, hwnd, (HMENU)IDC_CHK_CRATE_MAINTAIN, nullptr, nullptr);
         CreateWindowA("STATIC", "Target:", WS_CHILD | WS_CLIPSIBLINGS,
-            156, 286, 48, 20, hwnd, (HMENU)IDC_LBL_CRATE_TARGET, nullptr, nullptr);
+            156, 300, 48, 20, hwnd, (HMENU)IDC_LBL_CRATE_TARGET, nullptr, nullptr);
         CreateWindowA("EDIT", "0", WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | ES_READONLY | ES_CENTER,
-            206, 283, 48, 24, hwnd, (HMENU)IDC_EDIT_CRATE_TARGET, nullptr, nullptr);
+            206, 297, 48, 24, hwnd, (HMENU)IDC_EDIT_CRATE_TARGET, nullptr, nullptr);
+
         CreateWindowA("BUTTON", "-10", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            262, 282, 88, 26, hwnd, (HMENU)IDC_BTN_CRATE_SUB_10, nullptr, nullptr);
+            22, 326, 67, 25, hwnd, (HMENU)IDC_BTN_CRATE_SUB_10, nullptr, nullptr);
+        CreateWindowA("BUTTON", "-5", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            93, 326, 67, 25, hwnd, (HMENU)IDC_BTN_CRATE_SUB_5, nullptr, nullptr);
+        CreateWindowA("BUTTON", "-1", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            164, 326, 67, 25, hwnd, (HMENU)IDC_BTN_CRATE_SUB_1, nullptr, nullptr);
+        CreateWindowA("BUTTON", "+1", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            238, 326, 67, 25, hwnd, (HMENU)IDC_BTN_CRATE_ADD_1, nullptr, nullptr);
+        CreateWindowA("BUTTON", "+5", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+            309, 326, 67, 25, hwnd, (HMENU)IDC_BTN_CRATE_ADD_5, nullptr, nullptr);
         CreateWindowA("BUTTON", "+10", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            358, 282, 89, 26, hwnd, (HMENU)IDC_BTN_CRATE_ADD_10, nullptr, nullptr);
+            380, 326, 67, 25, hwnd, (HMENU)IDC_BTN_CRATE_ADD_10, nullptr, nullptr);
 
         CreateWindowA("BUTTON", "Clear All Crate Auto-Maintain Rules", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
-            22, 318, 425, 28, hwnd, (HMENU)IDC_BTN_CRATE_CLEAR_MAINTAIN, nullptr, nullptr);
+            22, 358, 425, 26, hwnd, (HMENU)IDC_BTN_CRATE_CLEAR_MAINTAIN, nullptr, nullptr);
 
         // --- TAB 3: Build Changers ---
         CreateWindowA("STATIC", "Station Build & Segment Modifiers:", WS_CHILD | WS_CLIPSIBLINGS,
-            22, 48, 425, 20, hwnd, (HMENU)IDC_LBL_BUILD_TITLE, nullptr, nullptr);
+            22, 72, 425, 20, hwnd, (HMENU)IDC_LBL_BUILD_TITLE, nullptr, nullptr);
         CreateWindowA("BUTTON", "Instant Room & Furniture Construction (WIP)", WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
-            22, 80, 425, 24, hwnd, (HMENU)IDC_CHK_BUILD_INSTANT, nullptr, nullptr);
+            22, 104, 425, 24, hwnd, (HMENU)IDC_CHK_BUILD_INSTANT, nullptr, nullptr);
         CreateWindowA("BUTTON", "Unlock All Segment Bulkheads (WIP)", WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
-            22, 112, 425, 24, hwnd, (HMENU)IDC_CHK_BUILD_UNLOCK_ALL, nullptr, nullptr);
+            22, 136, 425, 24, hwnd, (HMENU)IDC_CHK_BUILD_UNLOCK_ALL, nullptr, nullptr);
         CreateWindowA("STATIC",
             "Ready to wire directly to Startopia's build timer & segment\n"
             "ownership flags once offsets are confirmed.",
-            WS_CHILD | WS_CLIPSIBLINGS, 22, 152, 425, 45, hwnd, (HMENU)IDC_LBL_BUILD_NOTE, nullptr, nullptr);
+            WS_CHILD | WS_CLIPSIBLINGS, 22, 176, 425, 45, hwnd, (HMENU)IDC_LBL_BUILD_NOTE, nullptr, nullptr);
 
-        // --- TAB 4: Help ---
-        CreateWindowA("STATIC",
-            "STARTOPIA STANDALONE DLL CHEAT MENU\n\n"
-            "• [INSERT] : Show / Hide this Menu Overlay\n"
+        // --- TAB 4: Help/About ---
+        char helpBuf[512];
+        sprintf_s(helpBuf,
+            "Startopia Cheeseburger Menu (Classic Win32 UI)\n\n"
+            "• [%s] : Show / Hide this Menu Overlay\n"
+            "• Edit StartopiaCheeseburger.ini to toggle ImGui, Console, or Hotkey\n"
             "• Deck 0 = Sub Deck | Deck 1 = Leisure | Deck 2 = Bio\n"
             "• Auto-Maintain Rules:\n"
-            "   - Use '+10' and '-10' to step your target up to 999 safely\n"
-            "     so the engine processes spawns in clean 10-entity waves.\n"
-            "   - Peep Auto-Maintain ALWAYS spawns Residents for hireable\n"
-            "     species (and non-residents only for droids/creatures).",
-            WS_CHILD | WS_CLIPSIBLINGS, 22, 48, 425, 310, hwnd, (HMENU)IDC_LBL_HELP_TEXT, nullptr, nullptr);
+            "   - Use '+1 / +5 / +10' and '-1 / -5 / -10' to step targets\n"
+            "     safely up to 999 (paced in 10-entity waves every 2.5s).",
+            g_config.hotkeyName);
+        CreateWindowA("STATIC", helpBuf, WS_CHILD | WS_CLIPSIBLINGS,
+            22, 72, 425, 310, hwnd, (HMENU)IDC_LBL_HELP_TEXT, nullptr, nullptr);
 
         SetChildFont(hwnd);
         SyncPeepControlsForSelection();
@@ -1186,8 +1383,11 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
 
-        // --- Energy Tab Actions ---
-        if (id == IDC_BTN_NRG_ADD_50K && code == BN_CLICKED) {
+        if (id == IDC_CHK_ALWAYS_ON_TOP && code == BN_CLICKED) {
+            bool checked = (SendMessageA(GetDlgItem(hwnd, IDC_CHK_ALWAYS_ON_TOP), BM_GETCHECK, 0, 0) == BST_CHECKED);
+            ApplyMenuAlwaysOnTop(checked);
+        }
+        else if (id == IDC_BTN_NRG_ADD_50K && code == BN_CLICKED) {
             EnqueueCommand({ CMD_ADD_ENERGY, 50000, 0, 0, 0, 0, 0, false, 0, 0, 0 });
         }
         else if (id == IDC_BTN_NRG_ADD_500K && code == BN_CLICKED) {
@@ -1204,8 +1404,9 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 EnqueueCommand({ CMD_ADD_ENERGY, val, 0, 0, 0, 0, 0, false, 0, 0, 0 });
             }
         }
-
-        // --- Peep Tab Actions ---
+        else if (id == IDC_BTN_NRG_UNLOCK_ALL_TECH && code == BN_CLICKED) {
+            EnqueueCommand({ CMD_UNLOCK_ALL_TECH, 0, 0, 0, 0, 0, 0, false, 0, 0, 0 });
+        }
         else if (id == IDC_COMBO_PEEP_TYPE && code == CBN_SELCHANGE) {
             SyncPeepControlsForSelection();
         }
@@ -1254,6 +1455,18 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         else if (id == IDC_BTN_PEEP_SUB_10 && code == BN_CLICKED) {
             UpdatePeepMaintainRuleStep(hwnd, -10, false);
         }
+        else if (id == IDC_BTN_PEEP_SUB_5 && code == BN_CLICKED) {
+            UpdatePeepMaintainRuleStep(hwnd, -5, false);
+        }
+        else if (id == IDC_BTN_PEEP_SUB_1 && code == BN_CLICKED) {
+            UpdatePeepMaintainRuleStep(hwnd, -1, false);
+        }
+        else if (id == IDC_BTN_PEEP_ADD_1 && code == BN_CLICKED) {
+            UpdatePeepMaintainRuleStep(hwnd, 1, false);
+        }
+        else if (id == IDC_BTN_PEEP_ADD_5 && code == BN_CLICKED) {
+            UpdatePeepMaintainRuleStep(hwnd, 5, false);
+        }
         else if (id == IDC_BTN_PEEP_ADD_10 && code == BN_CLICKED) {
             UpdatePeepMaintainRuleStep(hwnd, 10, false);
         }
@@ -1264,8 +1477,6 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SetWindowTextA(GetDlgItem(hwnd, IDC_EDIT_PEEP_TARGET), "0");
             LogMsg("[RULE-PEEP] Cleared all Peep auto-maintain rules.\n");
         }
-
-        // --- Crate Tab Actions ---
         else if (id == IDC_COMBO_CRATE_TYPE && code == CBN_SELCHANGE) {
             SyncCrateControlsForSelection();
         }
@@ -1325,6 +1536,18 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         else if (id == IDC_BTN_CRATE_SUB_10 && code == BN_CLICKED) {
             UpdateCrateMaintainRuleStep(hwnd, -10, false);
         }
+        else if (id == IDC_BTN_CRATE_SUB_5 && code == BN_CLICKED) {
+            UpdateCrateMaintainRuleStep(hwnd, -5, false);
+        }
+        else if (id == IDC_BTN_CRATE_SUB_1 && code == BN_CLICKED) {
+            UpdateCrateMaintainRuleStep(hwnd, -1, false);
+        }
+        else if (id == IDC_BTN_CRATE_ADD_1 && code == BN_CLICKED) {
+            UpdateCrateMaintainRuleStep(hwnd, 1, false);
+        }
+        else if (id == IDC_BTN_CRATE_ADD_5 && code == BN_CLICKED) {
+            UpdateCrateMaintainRuleStep(hwnd, 5, false);
+        }
         else if (id == IDC_BTN_CRATE_ADD_10 && code == BN_CLICKED) {
             UpdateCrateMaintainRuleStep(hwnd, 10, false);
         }
@@ -1339,6 +1562,7 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     case WM_CLOSE:
+        g_menuVisible = false;
         ShowWindow(hwnd, SW_HIDE);
         return 0;
     }
@@ -1346,26 +1570,656 @@ LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
-void CreateTabbedMenuWindow(HMODULE hModule)
+void CreateClassicMenuWindow(HMODULE hModule)
 {
     WNDCLASSA wc{};
-    wc.lpfnWndProc = MenuWndProc;
+    wc.lpfnWndProc = ClassicMenuWndProc;
     wc.hInstance = hModule;
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = "StartopiaStandaloneCheatMenu";
     RegisterClassA(&wc);
 
     g_menuHwnd = CreateWindowExA(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        (g_alwaysOnTop ? WS_EX_TOPMOST : 0) | WS_EX_TOOLWINDOW,
         "StartopiaStandaloneCheatMenu",
-        "Startopia Cheat Mod (Standalone DLL)",
+        "Startopia Cheeseburger Menu",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        35, 35, 488, 475,
+        35, 35, 488, 500,
         nullptr, nullptr, hModule, nullptr
     );
 
-    ShowWindow(g_menuHwnd, SW_SHOW);
+    ShowWindow(g_menuHwnd, g_menuVisible ? SW_SHOW : SW_HIDE);
     UpdateWindow(g_menuHwnd);
+}
+
+// ==============================================================================
+// External DirectX 11 + Dear ImGui Overlay Window (Used when UseImGUI=true)
+// ==============================================================================
+static ID3D11Device* g_pd3dDevice = nullptr;
+static ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
+static IDXGISwapChain* g_pSwapChain = nullptr;
+static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
+
+void CreateRenderTarget()
+{
+    ID3D11Texture2D* pBackBuffer = nullptr;
+    if (SUCCEEDED(g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer))) && pBackBuffer) {
+        g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
+        pBackBuffer->Release();
+    }
+}
+
+void CleanupRenderTarget()
+{
+    if (g_mainRenderTargetView) {
+        g_mainRenderTargetView->Release();
+        g_mainRenderTargetView = nullptr;
+    }
+}
+
+bool CreateDeviceD3D(HWND hWnd)
+{
+    DXGI_SWAP_CHAIN_DESC sd{};
+    sd.BufferCount = 2;
+    sd.BufferDesc.Width = 0;
+    sd.BufferDesc.Height = 0;
+    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferDesc.RefreshRate.Numerator = 60;
+    sd.BufferDesc.RefreshRate.Denominator = 1;
+    sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow = hWnd;
+    sd.SampleDesc.Count = 1;
+    sd.SampleDesc.Quality = 0;
+    sd.Windowed = TRUE;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+    UINT createDeviceFlags = 0;
+    D3D_FEATURE_LEVEL featureLevel;
+    const D3D_FEATURE_LEVEL featureLevelArray[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
+    HRESULT res = D3D11CreateDeviceAndSwapChain(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createDeviceFlags,
+        featureLevelArray, 2, D3D11_SDK_VERSION, &sd,
+        &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
+    if (res == DXGI_ERROR_UNSUPPORTED) {
+        res = D3D11CreateDeviceAndSwapChain(
+            nullptr, D3D_DRIVER_TYPE_WARP, nullptr, createDeviceFlags,
+            featureLevelArray, 2, D3D11_SDK_VERSION, &sd,
+            &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
+    }
+    if (FAILED(res)) return false;
+
+    CreateRenderTarget();
+    return true;
+}
+
+void CleanupDeviceD3D()
+{
+    CleanupRenderTarget();
+    if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
+    if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
+    if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
+}
+
+LRESULT CALLBACK ImGuiOverlayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
+        return true;
+
+    switch (msg) {
+    case WM_SIZE:
+        if (g_pd3dDevice != nullptr && wParam != SIZE_MINIMIZED) {
+            CleanupRenderTarget();
+            g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
+            CreateRenderTarget();
+        }
+        return 0;
+    case WM_SYSCOMMAND:
+        if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
+        break;
+    case WM_CLOSE:
+        g_menuVisible = false;
+        ShowWindow(hWnd, SW_HIDE);
+        return 0;
+    }
+    return DefWindowProcA(hWnd, msg, wParam, lParam);
+}
+
+void RenderImGuiMenuContents()
+{
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->Pos);
+    ImGui::SetNextWindowSize(viewport->Size);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+    ImGui::Begin("Startopia Cheeseburger Menu", nullptr, flags);
+
+    // "Always on top" checkbox above the tab bar
+    if (ImGui::Checkbox("Always on top", &g_alwaysOnTop)) {
+        ApplyMenuAlwaysOnTop(g_alwaysOnTop);
+    }
+    ImGui::Separator();
+
+    if (ImGui::BeginTabBar("CheeseburgerTabs")) {
+        // --- TAB 0: Energy/Tech ---
+        if (ImGui::BeginTabItem("Energy/Tech")) {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Direct Wallet Energy Controls (No Script Needed):");
+            ImGui::Spacing();
+
+            if (ImGui::Button("+50,000 Energy", ImVec2(142, 32))) {
+                EnqueueCommand({ CMD_ADD_ENERGY, 50000, 0, 0, 0, 0, 0, false, 0, 0, 0 });
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("+500,000 Energy", ImVec2(148, 32))) {
+                EnqueueCommand({ CMD_ADD_ENERGY, 500000, 0, 0, 0, 0, 0, false, 0, 0, 0 });
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("-50,000 Energy", ImVec2(142, 32))) {
+                EnqueueCommand({ CMD_ADD_ENERGY, -50000, 0, 0, 0, 0, 0, false, 0, 0, 0 });
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            static int customEnergy = 100000;
+            ImGui::TextUnformatted("Custom Energy Amount (Positive or Negative):");
+            ImGui::SetNextItemWidth(240.0f);
+            ImGui::InputInt("##CustomEnergy", &customEnergy, 10000, 50000);
+            ImGui::SameLine();
+            if (ImGui::Button("Apply Energy", ImVec2(198, 26)) && customEnergy != 0) {
+                EnqueueCommand({ CMD_ADD_ENERGY, customEnergy, 0, 0, 0, 0, 0, false, 0, 0, 0 });
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            if (ImGui::Button("Unlock all tech", ImVec2(446, 36))) {
+                EnqueueCommand({ CMD_UNLOCK_ALL_TECH, 0, 0, 0, 0, 0, 0, false, 0, 0, 0 });
+            }
+            ImGui::TextWrapped(
+                "Discovers @alltech (all theories & blueprints). Note: Avoid using "
+                "during the Turakken research mission unless you want an instant win.");
+
+            ImGui::EndTabItem();
+        }
+
+        // --- TAB 1: Peeps ---
+        if (ImGui::BeginTabItem("Peeps")) {
+            static int peepIdx = 9; // Default: Salt Hog
+            static int peepDeck = 0;
+            static int peepX = 6;
+            static int peepY = 6;
+            static int peepQty = 1;
+            static bool peepRes = true;
+            static int peepSkill = 5;
+            static int peepDed = 5;
+            static int peepLoy = 5;
+
+            const char* deckLabels[] = {
+                "Deck 0 - Sub Deck (Engineering / Cargo)",
+                "Deck 1 - Leisure Deck",
+                "Deck 2 - Bio Deck"
+            };
+
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Peep / Droid Species:");
+            ImGui::SetNextItemWidth(446.0f);
+            if (ImGui::BeginCombo("##PeepSpecies", g_peepCatalog[peepIdx].label)) {
+                for (int i = 0; i < PEEP_CATALOG_COUNT; i++) {
+                    bool isSelected = (peepIdx == i);
+                    if (ImGui::Selectable(g_peepCatalog[i].label, isSelected)) {
+                        peepIdx = i;
+                        if (!g_peepCatalog[peepIdx].canBeResident) {
+                            peepRes = false;
+                        }
+                    }
+                    if (isSelected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::TextUnformatted("Target Deck:");
+            ImGui::SetNextItemWidth(446.0f);
+            ImGui::Combo("##PeepDeck", &peepDeck, deckLabels, 3);
+
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(110.0f);
+            ImGui::InputInt("Tile X", &peepX);
+            peepX = ClampInt(peepX, 0, 15);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(110.0f);
+            ImGui::InputInt("Tile Y", &peepY);
+            peepY = ClampInt(peepY, 0, 31);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(110.0f);
+            ImGui::InputInt("Qty", &peepQty);
+            peepQty = ClampInt(peepQty, 1, 50);
+
+            const auto& entry = g_peepCatalog[peepIdx];
+            if (!entry.canBeResident) {
+                peepRes = false;
+                ImGui::BeginDisabled();
+                ImGui::Checkbox("Resident (Hired Staff)", &peepRes);
+                ImGui::EndDisabled();
+            }
+            else {
+                ImGui::Checkbox("Resident (Hired Staff)", &peepRes);
+            }
+
+            ImGui::SetNextItemWidth(95.0f);
+            ImGui::InputInt("Skill", &peepSkill);
+            peepSkill = ClampInt(peepSkill, 0, 5);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(95.0f);
+            ImGui::InputInt("Dedication", &peepDed);
+            peepDed = ClampInt(peepDed, 0, 5);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(95.0f);
+            ImGui::InputInt("Loyalty", &peepLoy);
+            peepLoy = ClampInt(peepLoy, 0, 5);
+
+            ImGui::Spacing();
+            if (ImGui::Button("Spawn Peep(s) Now (Paced Grid)", ImVec2(446, 32))) {
+                bool isResident = entry.canBeResident && peepRes;
+                for (int i = 0; i < peepQty; i++) {
+                    int spawnX = (peepX + (i % 6)) & 0x0F;
+                    int spawnY = (peepY + (i / 6)) & 0x1F;
+                    EnqueueCommand({
+                        CMD_SPAWN_PEEP, 0, entry.id, 0,
+                        spawnX, spawnY, peepDeck,
+                        isResident,
+                        (unsigned char)peepSkill,
+                        (unsigned char)peepDed,
+                        (unsigned char)peepLoy
+                        });
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            int curTarget = 0;
+            bool curEnabled = false;
+            {
+                std::lock_guard<std::mutex> lock(g_maintainMutex);
+                curTarget = g_peepMaintainRules[entry.id].targetCount;
+                curEnabled = g_peepMaintainRules[entry.id].enabled;
+            }
+
+            auto ApplyPeepStep = [&](int deltaStep, bool toggleBool, bool newCheckedState) {
+                std::lock_guard<std::mutex> lock(g_maintainMutex);
+                auto& rule = g_peepMaintainRules[entry.id];
+                int nextTarget = ClampInt(rule.targetCount + deltaStep, 0, 999);
+                bool nextEnabled = toggleBool ? newCheckedState : rule.enabled;
+
+                if (!toggleBool && deltaStep > 0) nextEnabled = true;
+                if (nextTarget == 0) nextEnabled = false;
+
+                rule = {
+                    nextEnabled && (nextTarget > 0),
+                    nextTarget,
+                    peepX,
+                    peepY,
+                    peepDeck,
+                    entry.canBeResident,
+                    (unsigned char)peepSkill,
+                    (unsigned char)peepDed,
+                    (unsigned char)peepLoy
+                };
+                LogMsg("[RULE-PEEP] %s -> Maintain=%s | Target=%d | Mode=%s\n",
+                    entry.label, rule.enabled ? "ON" : "OFF", nextTarget,
+                    entry.canBeResident ? "RESIDENT ONLY" : "NON-HIREABLE");
+                };
+
+            if (ImGui::Checkbox("Maintain Target", &curEnabled)) {
+                ApplyPeepStep(0, true, curEnabled);
+            }
+            ImGui::SameLine();
+            ImGui::Text("Target: %d (Max 999)", curTarget);
+
+            if (ImGui::Button("-10##P", ImVec2(68, 26))) ApplyPeepStep(-10, false, false);
+            ImGui::SameLine();
+            if (ImGui::Button("-5##P", ImVec2(68, 26))) ApplyPeepStep(-5, false, false);
+            ImGui::SameLine();
+            if (ImGui::Button("-1##P", ImVec2(68, 26))) ApplyPeepStep(-1, false, false);
+            ImGui::SameLine();
+            if (ImGui::Button("+1##P", ImVec2(68, 26))) ApplyPeepStep(1, false, false);
+            ImGui::SameLine();
+            if (ImGui::Button("+5##P", ImVec2(68, 26))) ApplyPeepStep(5, false, false);
+            ImGui::SameLine();
+            if (ImGui::Button("+10##P", ImVec2(68, 26))) ApplyPeepStep(10, false, false);
+
+            ImGui::Spacing();
+            if (ImGui::Button("Clear All Peep Auto-Maintain Rules", ImVec2(446, 28))) {
+                std::lock_guard<std::mutex> lock(g_maintainMutex);
+                memset(g_peepMaintainRules, 0, sizeof(g_peepMaintainRules));
+                LogMsg("[RULE-PEEP] Cleared all Peep auto-maintain rules.\n");
+            }
+
+            ImGui::EndTabItem();
+        }
+
+        // --- TAB 2: Crates ---
+        if (ImGui::BeginTabItem("Crates")) {
+            static int crateIdx = 5; // Default: Food Crate
+            static int crateSubIdx = 0;
+            static int crateDeck = 0;
+            static int crateX = 8;
+            static int crateY = 6;
+            static int crateQty = 1;
+
+            const char* deckLabels[] = {
+                "Deck 0 - Sub Deck (Engineering / Cargo)",
+                "Deck 1 - Leisure Deck",
+                "Deck 2 - Bio Deck"
+            };
+
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Crate / Portable Type (Alphabetical):");
+            ImGui::SetNextItemWidth(446.0f);
+            if (ImGui::BeginCombo("##CrateType", g_crateCatalog[crateIdx].label)) {
+                for (int i = 0; i < CRATE_CATALOG_COUNT; i++) {
+                    bool isSelected = (crateIdx == i);
+                    if (ImGui::Selectable(g_crateCatalog[i].label, isSelected)) {
+                        crateIdx = i;
+                        crateSubIdx = 0;
+                    }
+                    if (isSelected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
+            const auto& entry = g_crateCatalog[crateIdx];
+            unsigned int extraVal = 0;
+
+            ImGui::TextUnformatted("Crate Sub-Type (Hardplan, Furniture, Droid, Tech):");
+            ImGui::SetNextItemWidth(446.0f);
+            if (entry.subTypeMode == 0) {
+                ImGui::BeginDisabled();
+                if (ImGui::BeginCombo("##CrateSub", "N/A - Standard Crate (Extra = 0)")) {
+                    ImGui::EndCombo();
+                }
+                ImGui::EndDisabled();
+            }
+            else if (entry.subTypeMode == 1) {
+                char preview[64];
+                sprintf_s(preview, "Tech Theory ID %02d", crateSubIdx + 1);
+                if (ImGui::BeginCombo("##CrateSub", preview)) {
+                    for (int t = 0; t < 45; t++) {
+                        char buf[64];
+                        sprintf_s(buf, "Tech Theory ID %02d", t + 1);
+                        if (ImGui::Selectable(buf, crateSubIdx == t)) crateSubIdx = t;
+                    }
+                    ImGui::EndCombo();
+                }
+                extraVal = (unsigned int)(crateSubIdx + 1);
+            }
+            else if (entry.subTypeMode == 2) {
+                if (crateSubIdx >= PEEP_CATALOG_COUNT) crateSubIdx = 0;
+                if (ImGui::BeginCombo("##CrateSub", g_peepCatalog[crateSubIdx].label)) {
+                    for (int i = 0; i < PEEP_CATALOG_COUNT; i++) {
+                        if (ImGui::Selectable(g_peepCatalog[i].label, crateSubIdx == i)) crateSubIdx = i;
+                    }
+                    ImGui::EndCombo();
+                }
+                extraVal = g_peepCatalog[crateSubIdx].id;
+            }
+            else if (entry.subTypeMode == 3) {
+                if (crateSubIdx >= ROOM_PLAN_COUNT) crateSubIdx = 0;
+                if (ImGui::BeginCombo("##CrateSub", g_roomPlanCatalog[crateSubIdx].label)) {
+                    for (int i = 0; i < ROOM_PLAN_COUNT; i++) {
+                        if (ImGui::Selectable(g_roomPlanCatalog[i].label, crateSubIdx == i)) crateSubIdx = i;
+                    }
+                    ImGui::EndCombo();
+                }
+                extraVal = g_roomPlanCatalog[crateSubIdx].id;
+            }
+            else if (entry.subTypeMode == 4) {
+                if (crateSubIdx >= FURN_PLAN_COUNT) crateSubIdx = 0;
+                if (ImGui::BeginCombo("##CrateSub", g_furniturePlanCatalog[crateSubIdx].label)) {
+                    for (int i = 0; i < FURN_PLAN_COUNT; i++) {
+                        if (ImGui::Selectable(g_furniturePlanCatalog[i].label, crateSubIdx == i)) crateSubIdx = i;
+                    }
+                    ImGui::EndCombo();
+                }
+                extraVal = g_furniturePlanCatalog[crateSubIdx].id;
+            }
+
+            ImGui::TextUnformatted("Target Deck:");
+            ImGui::SetNextItemWidth(446.0f);
+            ImGui::Combo("##CrateDeck", &crateDeck, deckLabels, 3);
+
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(110.0f);
+            ImGui::InputInt("Tile X##C", &crateX);
+            crateX = ClampInt(crateX, 0, 15);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(110.0f);
+            ImGui::InputInt("Tile Y##C", &crateY);
+            crateY = ClampInt(crateY, 0, 31);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(110.0f);
+            ImGui::InputInt("Qty##C", &crateQty);
+            crateQty = ClampInt(crateQty, 1, 50);
+
+            ImGui::Spacing();
+            if (ImGui::Button("Spawn Crate(s) Now", ImVec2(218, 32))) {
+                for (int i = 0; i < crateQty; i++) {
+                    int spawnX = (crateX + (i % 6)) & 0x0F;
+                    int spawnY = (crateY + (i / 6)) & 0x1F;
+                    EnqueueCommand({
+                        CMD_SPAWN_CRATE, 0, entry.id, extraVal,
+                        spawnX, spawnY, crateDeck,
+                        false, 0, 0, 0
+                        });
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Spawn All 17 Types", ImVec2(220, 32))) {
+                for (int i = 0; i < CRATE_CATALOG_COUNT; i++) {
+                    const auto& cEntry = g_crateCatalog[i];
+                    unsigned int defExtra = (cEntry.subTypeMode != 0) ? 1 : 0;
+                    int gx = (crateX + (i % 6)) & 0x0F;
+                    int gz = (crateY + (i / 6)) & 0x1F;
+                    EnqueueCommand({ CMD_SPAWN_CRATE, 0, cEntry.id, defExtra, gx, gz, crateDeck, false, 0, 0, 0 });
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            int curTarget = 0;
+            bool curEnabled = false;
+            {
+                std::lock_guard<std::mutex> lock(g_maintainMutex);
+                curTarget = entry.canMaintain ? g_crateMaintainRules[entry.id].targetCount : 0;
+                curEnabled = entry.canMaintain && g_crateMaintainRules[entry.id].enabled;
+            }
+
+            auto ApplyCrateStep = [&](int deltaStep, bool toggleBool, bool newCheckedState) {
+                if (!entry.canMaintain) return;
+                std::lock_guard<std::mutex> lock(g_maintainMutex);
+                auto& rule = g_crateMaintainRules[entry.id];
+                int nextTarget = ClampInt(rule.targetCount + deltaStep, 0, 999);
+                bool nextEnabled = toggleBool ? newCheckedState : rule.enabled;
+
+                if (!toggleBool && deltaStep > 0) nextEnabled = true;
+                if (nextTarget == 0) nextEnabled = false;
+
+                rule = {
+                    nextEnabled && (nextTarget > 0),
+                    nextTarget,
+                    crateX,
+                    crateY,
+                    crateDeck
+                };
+                LogMsg("[RULE-CRATE] %s -> Maintain=%s | Target=%d\n",
+                    entry.label, rule.enabled ? "ON" : "OFF", nextTarget);
+                };
+
+            if (!entry.canMaintain) ImGui::BeginDisabled();
+
+            if (ImGui::Checkbox("Maintain Target##C", &curEnabled)) {
+                ApplyCrateStep(0, true, curEnabled);
+            }
+            ImGui::SameLine();
+            ImGui::Text("Target: %d (Max 999)", curTarget);
+
+            if (ImGui::Button("-10##C", ImVec2(68, 26))) ApplyCrateStep(-10, false, false);
+            ImGui::SameLine();
+            if (ImGui::Button("-5##C", ImVec2(68, 26))) ApplyCrateStep(-5, false, false);
+            ImGui::SameLine();
+            if (ImGui::Button("-1##C", ImVec2(68, 26))) ApplyCrateStep(-1, false, false);
+            ImGui::SameLine();
+            if (ImGui::Button("+1##C", ImVec2(68, 26))) ApplyCrateStep(1, false, false);
+            ImGui::SameLine();
+            if (ImGui::Button("+5##C", ImVec2(68, 26))) ApplyCrateStep(5, false, false);
+            ImGui::SameLine();
+            if (ImGui::Button("+10##C", ImVec2(68, 26))) ApplyCrateStep(10, false, false);
+
+            if (!entry.canMaintain) ImGui::EndDisabled();
+
+            ImGui::Spacing();
+            if (ImGui::Button("Clear All Crate Auto-Maintain Rules", ImVec2(446, 28))) {
+                std::lock_guard<std::mutex> lock(g_maintainMutex);
+                memset(g_crateMaintainRules, 0, sizeof(g_crateMaintainRules));
+                LogMsg("[RULE-CRATE] Cleared all Crate auto-maintain rules.\n");
+            }
+
+            ImGui::EndTabItem();
+        }
+
+        // --- TAB 3: Build Changers ---
+        if (ImGui::BeginTabItem("Build Changers")) {
+            static bool instantBuild = false;
+            static bool unlockSegments = false;
+
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Station Build & Segment Modifiers:");
+            ImGui::Spacing();
+            ImGui::Checkbox("Instant Room & Furniture Construction (WIP)", &instantBuild);
+            ImGui::Checkbox("Unlock All Segment Bulkheads (WIP)", &unlockSegments);
+            ImGui::Spacing();
+            ImGui::TextWrapped(
+                "Ready to wire directly to Startopia's build timer & segment "
+                "ownership flags once offsets are confirmed.");
+            ImGui::EndTabItem();
+        }
+
+        // --- TAB 4: Help/About ---
+        if (ImGui::BeginTabItem("Help/About")) {
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Startopia Cheeseburger Menu (Dear ImGui DX11 Overlay)");
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::BulletText("[%s] : Show / Hide this Menu Overlay", g_config.hotkeyName);
+            ImGui::BulletText("INI File : StartopiaCheeseburger.ini (auto-generated)");
+            ImGui::BulletText("Decks : 0 = Sub Deck | 1 = Leisure | 2 = Bio");
+            ImGui::Spacing();
+            ImGui::TextWrapped(
+                "Auto-Maintain Rules: Use '+1 / +5 / +10' and '-1 / -5 / -10' to step targets "
+                "safely up to 999 (paced in 10-entity waves every 2.5s). Peep Auto-Maintain "
+                "always spawns Residents for hireable species.");
+            ImGui::EndTabItem();
+        }
+
+        ImGui::EndTabBar();
+    }
+
+    ImGui::End();
+}
+
+void RunImGuiWindowLoop(HMODULE hModule)
+{
+    WNDCLASSEXA wc{
+        sizeof(WNDCLASSEXA), CS_CLASSDC, ImGuiOverlayWndProc, 0L, 0L,
+        hModule, nullptr, nullptr, nullptr, nullptr,
+        "StartopiaImGuiCheeseburgerMenu", nullptr
+    };
+    RegisterClassExA(&wc);
+
+    g_menuHwnd = CreateWindowExA(
+        (g_alwaysOnTop ? WS_EX_TOPMOST : 0) | WS_EX_TOOLWINDOW,
+        wc.lpszClassName,
+        "Startopia Cheeseburger Menu",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        35, 35, 488, 500,
+        nullptr, nullptr, wc.hInstance, nullptr
+    );
+
+    if (!CreateDeviceD3D(g_menuHwnd)) {
+        CleanupDeviceD3D();
+        UnregisterClassA(wc.lpszClassName, wc.hInstance);
+        LogMsg("[ERROR] DX11 Init failed for ImGui menu; falling back to Classic Win32 UI.\n");
+        CreateClassicMenuWindow(hModule);
+
+        MSG msg{};
+        while (true) {
+            while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg);
+                DispatchMessageA(&msg);
+            }
+            if (GetAsyncKeyState(g_config.hotkeyVK) & 1) {
+                g_menuVisible = !g_menuVisible;
+                ShowWindow(g_menuHwnd, g_menuVisible ? SW_SHOW : SW_HIDE);
+            }
+            Sleep(20);
+        }
+        return;
+    }
+
+    ShowWindow(g_menuHwnd, g_menuVisible ? SW_SHOW : SW_HIDE);
+    UpdateWindow(g_menuHwnd);
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    ImGui::StyleColorsDark();
+
+    ImGui_ImplWin32_Init(g_menuHwnd);
+    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+
+    const float clearColor[4] = { 0.10f, 0.10f, 0.12f, 1.00f };
+    MSG msg{};
+
+    while (true) {
+        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+
+        if (GetAsyncKeyState(g_config.hotkeyVK) & 1) {
+            g_menuVisible = !g_menuVisible;
+            ShowWindow(g_menuHwnd, g_menuVisible ? SW_SHOW : SW_HIDE);
+        }
+
+        if (g_menuVisible && g_pd3dDevice != nullptr) {
+            ImGui_ImplDX11_NewFrame();
+            ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
+
+            RenderImGuiMenuContents();
+
+            ImGui::Render();
+            g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+            g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clearColor);
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+            g_pSwapChain->Present(1, 0);
+        }
+        else {
+            Sleep(25);
+        }
+    }
 }
 
 // ==============================================================================
@@ -1376,17 +2230,28 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
     HMODULE hModule = (HMODULE)lpReserved;
     Sleep(2500);
 
-    AllocConsole();
-    FILE* f;
-    freopen_s(&f, "CONOUT$", "w", stdout);
-    fopen_s(&g_logFile, "mod_crash.log", "w");
+    LoadOrCreateIniConfig();
+
+    if (g_config.toggleConsole) {
+        AllocConsole();
+        FILE* f = nullptr;
+        freopen_s(&f, "CONOUT$", "w", stdout);
+    }
+
+    if (g_config.outputCrashLog) {
+        fopen_s(&g_logFile, "mod_crash.log", "w");
+    }
 
     AddVectoredExceptionHandler(1, GlobalVectoredCrashHandler);
 
     g_baseAddress = (DWORD)GetModuleHandle(NULL);
     LogMsg("Startopia Base Address: 0x%08X\n", g_baseAddress);
-
-    CreateTabbedMenuWindow(hModule);
+    LogMsg("Loaded INI: ToggleConsole=%d | UseImGUI=%d | Hotkey=%s (0x%02X) | OutputCrashLog=%d | ShowMenuOnStart=%d\n",
+        g_config.toggleConsole ? 1 : 0,
+        g_config.useImGUI ? 1 : 0,
+        g_config.hotkeyName, g_config.hotkeyVK,
+        g_config.outputCrashLog ? 1 : 0,
+        g_config.showMenuOnStart ? 1 : 0);
 
     for (int attempt = 0; attempt < 20 && g_gameHwnd == nullptr; attempt++) {
         g_gameHwnd = FindStartopiaMainWindow();
@@ -1403,23 +2268,27 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
         LogMsg("[ERROR] Could not locate Startopia main window handle!\n");
     }
 
-    LogMsg("Standalone Tabbed Cheat Menu ready! Press [INSERT] to toggle visibility.\n");
+    LogMsg("Startopia Cheeseburger Menu ready! Press [%s] to toggle visibility.\n", g_config.hotkeyName);
 
-    MSG msg{};
-    bool menuVisible = true;
+    if (g_config.useImGUI) {
+        RunImGuiWindowLoop(hModule);
+    }
+    else {
+        CreateClassicMenuWindow(hModule);
+        MSG msg{};
+        while (true) {
+            while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg);
+                DispatchMessageA(&msg);
+            }
 
-    while (true) {
-        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessageA(&msg);
+            if (GetAsyncKeyState(g_config.hotkeyVK) & 1) {
+                g_menuVisible = !g_menuVisible;
+                ShowWindow(g_menuHwnd, g_menuVisible ? SW_SHOW : SW_HIDE);
+            }
+
+            Sleep(20);
         }
-
-        if (GetAsyncKeyState(VK_INSERT) & 1) {
-            menuVisible = !menuVisible;
-            ShowWindow(g_menuHwnd, menuVisible ? SW_SHOW : SW_HIDE);
-        }
-
-        Sleep(20);
     }
 
     return 0;
