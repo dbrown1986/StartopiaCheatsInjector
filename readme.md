@@ -16,7 +16,6 @@ The name **"Cheeseburger Menu"** is a direct nod to the famous debug/cheat menu 
 
 ### Energy & Technology (`Energy/Tech`)
 * **Direct Wallet Energy Controls:** Instantly add (`+50,000`, `+500,000`), subtract (`-50,000`), or apply any custom positive/negative energy amount directly to the player's balance.
-* **Free New Segments (10,000e Instant Refund):** Hooks the engine's energy deduction routine (`FUN_005aea80`) to automatically refund the `10,000` energy cost whenever you unlock a new station bulkhead.
 * **Unlock All Tech:** Executes `@alltech` (`0xFFFFFFFF`) to immediately discover all theories and blueprints across the tech tree. *(Includes a disclaimer to avoid using it during the Turakken research mission unless you want an instant win.)*
 
 ### Entity Spawning (`Peeps` & `Crates`)
