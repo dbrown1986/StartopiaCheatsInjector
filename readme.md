@@ -4,19 +4,15 @@
 
 An in-game cheat and sandbox manipulation overlay for **Startopia** (Steam `1.01.1-b3`). Rather than relying on static mission text scripts (`mishXX.txt`), this mod uses a `version.dll` proxy and **MinHook** to execute internal engine functions directly on the main game thread via a **Dear ImGui** overlay (with a Classic Win32 GDI fallback).
 
----
+### Run the game in Windowed mode (or use a third-party borderless window utility). Exclusive full-screen mode is not supported.
 
 ## Dedicated to Chris Nelson
 
 A good friend who passed the night this mod was finished.
 
----
-
 ## Origin of the Name
 
 The name **"Cheeseburger Menu"** is a direct nod to the famous debug/cheat menu in *Deus Ex: Human Revolution*—originally uncovered by **Gibbed** (Rick)—which was affectionately dubbed the **"Hamburger Menu"**. In keeping with that tradition, this project earned the title **Cheeseburger Menu**.
-
----
 
 ## Features
 
@@ -44,8 +40,6 @@ The name **"Cheeseburger Menu"** is a direct nod to the famous debug/cheat menu 
 * **Always on Top Toggle:** Keep the menu pinned above the game window or let it sit behind when unfocused.
 * **Auto-Generated INI (`StartopiaCheeseburger.ini`):** Customize `ToggleConsole`, `UseImGUI`, `Hotkey` (default `F12`), `OutputCrashLog`, and `ShowMenuOnStart`.
 
----
-
 ## Requirements & Installation
 
 1. **Game Version:** Requires the latest Steam beta build of Startopia (`1.01.1-b3`).
@@ -53,13 +47,9 @@ The name **"Cheeseburger Menu"** is a direct nod to the famous debug/cheat menu 
 3. **Install:** Place the compiled `version.dll` into your main Startopia installation folder (next to `startopia.exe`).
 4. **Launch:** Start the game. `StartopiaCheeseburger.ini` will be generated automatically on first run. Press **F12** (or your configured hotkey) at any time to toggle the menu.
 
----
-
 ## Known Bugs
 
 * **Occasional Black Screen on Map Load:** When starting a new mission or sandbox game, the screen may occasionally remain black. If this happens, close/restart the game and try loading the mission or sandbox map again.
-
----
 
 ## Credits & Special Thanks
 
