@@ -1378,12 +1378,13 @@ LRESULT CALLBACK ClassicMenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         sprintf_s(helpBuf,
             "Startopia Cheeseburger Menu v1.0 (Classic Win32 UI)\n"
             "Build Date: 11/18/2026\n"
-            "Powered by Dear ImGui & MinHook\n\n"
+            "Powered by Dear ImGui & MinHook\n"
+            "Dedicated to Chris Nelson.\n\n"
             "• [%s] : Show / Hide this Menu Overlay\n"
             "• Edit StartopiaCheeseburger.ini to toggle ImGui, Console, or Hotkey\n"
             "• Deck 0 = Sub Deck | Deck 1 = Leisure | Deck 2 = Bio\n"
             "• Batch Spawning: Spawns 1 to 50 entities on a clean paced grid\n"
-            "  starting at your chosen Tile X / Tile Y coordinates.",
+            "  starting at your chosen Tile X / Tile Y coordinates.\n",
             g_config.hotkeyName);
         CreateWindowA("STATIC", helpBuf, WS_CHILD | WS_CLIPSIBLINGS,
             22, 72, 425, 310, hwnd, (HMENU)IDC_LBL_HELP_TEXT, nullptr, nullptr);
@@ -2118,6 +2119,7 @@ void RenderImGuiMenuContents()
             ImGui::Spacing();
             ImGui::TextUnformatted("Startopia Cheeseburger Menu v1.0 (Dear ImGui DX11 Overlay)");
             ImGui::TextDisabled("Build Date: 11/18/2026  |  Powered by Dear ImGui & MinHook");
+            ImGui::TextDisabled("Dedicated to Chris Nelson.");
             ImGui::Separator();
             ImGui::Spacing();
             ImGui::BulletText("[%s] : Show / Hide this Menu Overlay", g_config.hotkeyName);

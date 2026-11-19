@@ -3,6 +3,11 @@
 **Build Date:** 11/18/2026
 
 An in-game cheat and sandbox manipulation overlay for **Startopia** (Steam `1.01.1-b3`). Rather than relying on static mission text scripts (`mishXX.txt`), this mod uses a `version.dll` proxy and **MinHook** to execute internal engine functions directly on the main game thread via a **Dear ImGui** overlay (with a Classic Win32 GDI fallback).
+---
+
+## Dedicated to Chris Nelson
+
+A good friend who passed the night this mod was finished.
 
 ---
 
