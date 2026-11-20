@@ -5,7 +5,11 @@
 
 An in-game cheat and sandbox manipulation overlay for **Startopia** (Steam `1.01.1-b3`). Rather than relying on static mission text scripts (`mishXX.txt`), this mod uses a `version.dll` proxy and **MinHook** to execute internal engine functions directly on the main game thread via a **Dear ImGui** overlay (with a Classic Win32 GDI fallback).
 
-### Run the game in Windowed mode (or use a third-party borderless window utility). Exclusive full-screen mode is not supported.
+The menu is designed as external, ImGui does not have native support for DirectX7, you will need to run the beta builds with /r or use DXWnd with the stable release to force windowed mode. You can force Borderless with third-party tools. Currently seeking reliable alternatives.
+
+## Supported Versions
+
+1.01.1-b3 (beta_debug)
 
 ## Dedicated to Chris Nelson
 

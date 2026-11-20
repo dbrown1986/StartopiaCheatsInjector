@@ -46,21 +46,139 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 #pragma comment(linker, "/EXPORT:VerQueryValueW=C:\\Windows\\System32\\version.VerQueryValueW")
 
 // ==============================================================================
-// Startopia Steam Build Dynamic Offsets (Ghidra Addr - 0x00400000)
+// Automatic Native Windowed Mode (/r) Injector via GetCommandLineA IAT Hook
 // ==============================================================================
-const DWORD OFFSET_DEDUCT_ENERGY = 0x001AEA80; // FUN_005aea80 (Deducts energy for segment/action purchases)
-const DWORD OFFSET_SCRIPT_ADD_ENERGY = 0x001AEEC0; // FUN_005aeec0 (Player Energy Modifier)
-const DWORD OFFSET_DISCOVER_TECH = 0x002A0430; // FUN_006a0430 (Discover Tech / -1 = @alltech)
-const DWORD OFFSET_SPAWN_PEEP_SP = 0x0022E2B0; // FUN_0062e2b0 (Singleplayer Peep Spawner)
-const DWORD OFFSET_SPAWN_PEEP_MP = 0x0022E3D0; // FUN_0062e3d0 (Multiplayer/Alt Peep Spawner)
-const DWORD OFFSET_SPAWN_PORTABLE = 0x0018F9D0; // FUN_0058f9d0 (Portable/Crate Spawner)
-const DWORD OFFSET_GET_PLAYER_SECTOR = 0x0023C680; // FUN_0063c680 (Gets player's station sector)
-const DWORD OFFSET_PACK_COORDS = 0x00061280; // FUN_00461280 (Packs X, Z, Deck into tile ID)
-const DWORD OFFSET_SPECIES_TABLE = 0x004D9AF8; // DAT_008d9af8 (Loaded Peep definitions)
-const DWORD OFFSET_FLAG_MP_MODE = 0x007FE1AC; // DAT_00bfe1ac
-const DWORD OFFSET_PLAYER_PTR = 0x007F5170; // DAT_00bf5170
-const DWORD OFFSET_BUILD_SLONGS_LIST = 0x0068387C; // DAT_00a8387c (BUILD SLONGS linked list head)
-const DWORD OFFSET_BUILD_FLOATS_LIST = 0x00683880; // DAT_00a83880 (BUILD FLOATS linked list head)
+typedef LPSTR(WINAPI* tGetCommandLineA)(void);
+tGetCommandLineA pOriginalGetCommandLineA = nullptr;
+static char g_patchedCmdLine[2048]{};
+static bool g_cmdLinePatched = false;
+
+LPSTR WINAPI hkGetCommandLineA()
+{
+    LPSTR orig = pOriginalGetCommandLineA ? pOriginalGetCommandLineA() : GetCommandLineA();
+    if (!orig) return orig;
+
+    if (!g_cmdLinePatched) {
+        strncpy_s(g_patchedCmdLine, orig, sizeof(g_patchedCmdLine) - 16);
+        // Append /r if the user did not already pass /r or /f on the command line
+        bool hasWindowArg = false;
+        for (const char* p = g_patchedCmdLine; *p; ++p) {
+            if ((*p == '/' || *p == '-') &&
+                (p[1] == 'r' || p[1] == 'R' || p[1] == 'f' || p[1] == 'F')) {
+                hasWindowArg = true;
+                break;
+            }
+        }
+        if (!hasWindowArg) {
+            strcat_s(g_patchedCmdLine, " /r");
+        }
+        g_cmdLinePatched = true;
+    }
+    return g_patchedCmdLine;
+}
+
+bool HookModuleIAT(HMODULE hMod, const char* targetDll, const char* funcName, void* detour, void** originalOut)
+{
+    if (!hMod) return false;
+    BYTE* base = (BYTE*)hMod;
+    auto* dos = (IMAGE_DOS_HEADER*)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+
+    auto* nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+
+    DWORD importRva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (!importRva) return false;
+
+    auto* impDesc = (IMAGE_IMPORT_DESCRIPTOR*)(base + importRva);
+    for (; impDesc->Name; impDesc++) {
+        const char* dllName = (const char*)(base + impDesc->Name);
+        if (_stricmp(dllName, targetDll) != 0) continue;
+
+        auto* origThunk = (IMAGE_THUNK_DATA*)(base + impDesc->OriginalFirstThunk);
+        auto* iatThunk = (IMAGE_THUNK_DATA*)(base + impDesc->FirstThunk);
+
+        for (; origThunk->u1.AddressOfData; origThunk++, iatThunk++) {
+            if (IMAGE_SNAP_BY_ORDINAL(origThunk->u1.Ordinal)) continue;
+            auto* impByName = (IMAGE_IMPORT_BY_NAME*)(base + origThunk->u1.AddressOfData);
+            if (strcmp((const char*)impByName->Name, funcName) == 0) {
+                DWORD oldProtect;
+                VirtualProtect(&iatThunk->u1.Function, sizeof(ULONG_PTR), PAGE_READWRITE, &oldProtect);
+                if (originalOut) *originalOut = (void*)iatThunk->u1.Function;
+                iatThunk->u1.Function = (ULONG_PTR)detour;
+                VirtualProtect(&iatThunk->u1.Function, sizeof(ULONG_PTR), oldProtect, &oldProtect);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void InstallAutoWindowedArgHook()
+{
+    HMODULE hExe = GetModuleHandleA(nullptr);
+    if (hExe) {
+        HookModuleIAT(hExe, "KERNEL32.dll", "GetCommandLineA", (void*)&hkGetCommandLineA, (void**)&pOriginalGetCommandLineA);
+    }
+}
+
+// ==============================================================================
+// Multi-Version Offset Table (1.01.1-b3 Non-Debug & 1.01.1-b3_debug)
+// ==============================================================================
+struct GameOffsets {
+    const char* versionLabel;
+    DWORD deductEnergy;
+    DWORD scriptAddEnergy;
+    DWORD discoverTech;
+    DWORD spawnPeepSP;
+    DWORD spawnPeepMP;
+    DWORD spawnPortable;
+    DWORD getPlayerSector;
+    DWORD packCoords;
+    DWORD speciesTable;      // 0 if validated natively by SpawnPeep
+    DWORD flagMpMode;
+    DWORD playerPtr;
+    DWORD buildSlongsList;
+    DWORD buildFloatsList;
+};
+
+// Profile 0: Startopia 1.01.1-b3 (Non-Debug)
+static const GameOffsets OFFSETS_1_01_1_B3 = {
+    "1.01.1-b3 (Non-Debug)",
+    0x00000000, // deductEnergy (disabled)
+    0x001AB390, // FUN_005ab390
+    0x0029AEA0, // FUN_0069aea0
+    0x00229B80, // FUN_00629b80
+    0x00229CA0, // FUN_00629ca0
+    0x0018B9B0, // FUN_0058b9b0
+    0x00237F10, // FUN_00637f10
+    0x0005EE30, // FUN_0045ee30
+    0x00000000, // Validated natively inside FUN_0062a2e0
+    0x007F0C4C, // DAT_00bf0c4c
+    0x007E7C2C, // DAT_00be7c2c
+    0x0067632C, // DAT_00a7632c
+    0x00676330  // DAT_00a76330
+};
+
+// Profile 1: Startopia 1.01.1-b3_debug
+static const GameOffsets OFFSETS_1_01_1_B3_DEBUG = {
+    "1.01.1-b3_debug",
+    0x001AEA80, // FUN_005aea80
+    0x001AEEC0, // FUN_005aeec0
+    0x002A0430, // FUN_006a0430
+    0x0022E2B0, // FUN_0062e2b0
+    0x0022E3D0, // FUN_0062e3d0
+    0x0018F9D0, // FUN_0058f9d0
+    0x0023C680, // FUN_0063c680
+    0x00061280, // FUN_00461280
+    0x004D9AF8, // DAT_008d9af8
+    0x007FE1AC, // DAT_00bfe1ac
+    0x007F5170, // DAT_00bf5170
+    0x0068387C, // DAT_00a8387c
+    0x00683880  // DAT_00a83880
+};
+
+GameOffsets g_offsets = OFFSETS_1_01_1_B3;
 
 DWORD   g_baseAddress = 0;
 FILE* g_logFile = nullptr;
@@ -115,6 +233,50 @@ void LogMsg(const char* fmt, ...)
         fprintf(g_logFile, "%s", finalBuf);
         fflush(g_logFile);
     }
+}
+
+// ==============================================================================
+// Runtime Version Detector (Selects 1.01.1-b3 vs 1.01.1-b3_debug at Launch)
+// ==============================================================================
+bool CheckBytesAtRVA(DWORD rva, const BYTE* expected, size_t len)
+{
+    __try {
+        const BYTE* ptr = (const BYTE*)(g_baseAddress + rva);
+        return memcmp(ptr, expected, len) == 0;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void DetectGameVersion()
+{
+    // Both FUN_005aeec0 (1.01.1-b3_debug @ 0x001AEEC0) and FUN_005ab390 (1.01.1-b3 @ 0x001AB390)
+    // begin with the exact 3-byte SEH frame header: 6A FF 68 (push -1; push SEH_Handler)
+    const BYTE sigSehPrologue[] = { 0x6A, 0xFF, 0x68 };
+
+    bool isB3NonDebug = CheckBytesAtRVA(OFFSETS_1_01_1_B3.scriptAddEnergy, sigSehPrologue, sizeof(sigSehPrologue));
+    bool isB3Debug = CheckBytesAtRVA(OFFSETS_1_01_1_B3_DEBUG.scriptAddEnergy, sigSehPrologue, sizeof(sigSehPrologue));
+
+    if (isB3NonDebug && !isB3Debug) {
+        g_offsets = OFFSETS_1_01_1_B3;
+    }
+    else if (isB3Debug && !isB3NonDebug) {
+        g_offsets = OFFSETS_1_01_1_B3_DEBUG;
+    }
+    else {
+        // Tie-breaker via PackCoords prologue (push ebp; mov ebp, esp -> 55 8B EC)
+        const BYTE sigStdPrologue[] = { 0x55, 0x8B, 0xEC };
+        if (CheckBytesAtRVA(OFFSETS_1_01_1_B3.packCoords, sigStdPrologue, sizeof(sigStdPrologue))) {
+            g_offsets = OFFSETS_1_01_1_B3;
+        }
+        else {
+            g_offsets = OFFSETS_1_01_1_B3_DEBUG;
+        }
+    }
+
+    LogMsg("[VERSION] Detected Startopia build: %s (AddEnergy=0x%08X, PlayerPtr=0x%08X)\n",
+        g_offsets.versionLabel, g_offsets.scriptAddEnergy, g_offsets.playerPtr);
 }
 
 // ==============================================================================
@@ -214,7 +376,6 @@ void LoadOrCreateIniConfig()
 
 // ==============================================================================
 // Verified Crate, Tech Theory, Room Hard-Plan, Furniture Plan & Peep Catalogs
-// (All Sorted Alphabetically by Display Label with Verified Engine IDs)
 // ==============================================================================
 struct SubTypeEntry {
     unsigned int id;
@@ -346,7 +507,6 @@ static const SubTypeEntry g_roomPlanCatalog[] = {
     { 39, "Love Nest" },
     { 26, "Music Shop" },
     { 19, "Orophux" },
-    // { 2,  "Lift (RT_LIFT)" }, (DO NOT SPAWN)
     { 23, "Palace Galactica" },
     { 12, "Recharger" },
     { 34, "Recreational Bar" },
@@ -415,7 +575,7 @@ static const int FURN_PLAN_COUNT = sizeof(g_furniturePlanCatalog) / sizeof(g_fur
 struct CrateCatalogEntry {
     unsigned int id;
     const char* label;
-    int subTypeMode; // 0 = Standard Crate, 1 = Tech Theory, 2 = Scutter/Peep, 3 = Room Plan, 4 = Furniture Plan
+    int subTypeMode;
 };
 
 static const CrateCatalogEntry g_crateCatalog[] = {
@@ -468,9 +628,6 @@ static const PeepCatalogEntry g_peepCatalog[] = {
 };
 static const int PEEP_CATALOG_COUNT = sizeof(g_peepCatalog) / sizeof(g_peepCatalog[0]);
 
-// ==============================================================================
-// Native 72-Byte Peep Attribute Struct (Matches local_50..local_8 in FUN_006702a0)
-// ==============================================================================
 #pragma pack(push, 1)
 struct PeepAttributesFull {
     unsigned int peepType;       // +0x00 (local_50): Peep species ID
@@ -514,6 +671,7 @@ std::mutex g_cmdMutex;
 
 void EnqueueCommand(const ModCommand& cmd)
 {
+    LogMsg("[CMD-QUEUE] Enqueued command type=%d (id=%u, amount=%d)\n", (int)cmd.type, cmd.id, cmd.amount);
     std::lock_guard<std::mutex> lock(g_cmdMutex);
     g_cmdQueue.push(cmd);
 }
@@ -539,9 +697,6 @@ LONG WINAPI GlobalVectoredCrashHandler(PEXCEPTION_POINTERS ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-// ==============================================================================
-// Window Always-On-Top Helper (Shared by ImGui and Classic Win32 UI)
-// ==============================================================================
 void ApplyMenuAlwaysOnTop(bool alwaysOnTop)
 {
     g_alwaysOnTop = alwaysOnTop;
@@ -568,8 +723,8 @@ typedef unsigned int(__fastcall* tSpawnPortable)(unsigned int* pPackedCoords, un
 
 unsigned int GetSafePlayerTile(void* pPlayer, int localOffsetX, int localZ, int deck)
 {
-    auto GetSector = (tGetPlayerSector)(g_baseAddress + OFFSET_GET_PLAYER_SECTOR);
-    auto PackCoords = (tPackCoords)(g_baseAddress + OFFSET_PACK_COORDS);
+    auto GetSector = (tGetPlayerSector)(g_baseAddress + g_offsets.getPlayerSector);
+    auto PackCoords = (tPackCoords)(g_baseAddress + g_offsets.packCoords);
 
     unsigned int minX = *(unsigned int*)((BYTE*)pPlayer + 0x1785 + deck * 4);
     unsigned int maxX = *(unsigned int*)((BYTE*)pPlayer + 0x1791 + deck * 4);
@@ -587,16 +742,10 @@ unsigned int GetSafePlayerTile(void* pPlayer, int localOffsetX, int localZ, int 
 
 void ExecuteAddEnergy(void* pPlayer, int amount)
 {
-    auto ScriptAddEnergy = (tScriptAddEnergy)(g_baseAddress + OFFSET_SCRIPT_ADD_ENERGY);
+    auto ScriptAddEnergy = (tScriptAddEnergy)(g_baseAddress + g_offsets.scriptAddEnergy);
     LogMsg("[EXEC-ENERGY] Modifying player energy by %+d (pPlayer=0x%p)\n", amount, pPlayer);
     ScriptAddEnergy(pPlayer, amount);
 }
-
-// ==============================================================================
-// MinHook Detour: Instant 10,000e Refund on Segment Bulkhead Unlock (FUN_005aea80)
-// ==============================================================================
-
-// This feature is disabled for the time being (still testing).
 
 typedef void(__thiscall* tDeductEnergy)(void* pThis, int amount, void* pPlayer);
 tDeductEnergy pOriginalDeductEnergy = nullptr;
@@ -606,7 +755,7 @@ void __fastcall HookedDeductEnergy(void* pThis, void* /*edx*/, int amount, void*
     pOriginalDeductEnergy(pThis, amount, pPlayer);
 
     if (g_freeNewSegments && amount == 10000 && pPlayer != nullptr) {
-        void* pLocalPlayer = *(void**)(g_baseAddress + OFFSET_PLAYER_PTR);
+        void* pLocalPlayer = *(void**)(g_baseAddress + g_offsets.playerPtr);
         if (pPlayer == pLocalPlayer) {
             LogMsg("[REFUND-SEG] Refunding %d energy for segment unlock (pPlayer=0x%p)\n", amount, pPlayer);
             ExecuteAddEnergy(pPlayer, amount);
@@ -616,20 +765,24 @@ void __fastcall HookedDeductEnergy(void* pThis, void* /*edx*/, int amount, void*
 
 void ExecuteUnlockAllTech(void* pPlayer)
 {
-    auto DiscoverTech = (tDiscoverTech)(g_baseAddress + OFFSET_DISCOVER_TECH);
+    auto DiscoverTech = (tDiscoverTech)(g_baseAddress + g_offsets.discoverTech);
     LogMsg("[EXEC-TECH] Discovering @alltech (0xFFFFFFFF) for pPlayer=0x%p\n", pPlayer);
     DiscoverTech(pPlayer, 0xFFFFFFFF);
 }
 
 void ExecuteSpawnPeep(const ModCommand& cmd, void* pPlayer)
 {
-    void** speciesTable = (void**)(g_baseAddress + OFFSET_SPECIES_TABLE);
-    if (cmd.id < 1 || cmd.id > 23 || speciesTable[cmd.id] == nullptr) {
-        LogMsg("[PEEP-SKIP] Peep ID %u is NOT loaded in DAT_008d9af8 for this map.\n", cmd.id);
-        return;
+    if (cmd.id < 1 || cmd.id > 23) return;
+
+    if (g_offsets.speciesTable != 0) {
+        void** speciesTable = (void**)(g_baseAddress + g_offsets.speciesTable);
+        if (speciesTable[cmd.id] == nullptr) {
+            LogMsg("[PEEP-SKIP] Peep ID %u is NOT loaded in species table for this map.\n", cmd.id);
+            return;
+        }
     }
 
-    int mpFlag = *(int*)(g_baseAddress + OFFSET_FLAG_MP_MODE);
+    int mpFlag = *(int*)(g_baseAddress + g_offsets.flagMpMode);
     unsigned int packedCoord = GetSafePlayerTile(pPlayer, cmd.localX, cmd.localZ, cmd.deck);
 
     PeepAttributesFull attr{};
@@ -646,11 +799,11 @@ void ExecuteSpawnPeep(const ModCommand& cmd, void* pPlayer)
         cmd.skill, cmd.dedication, cmd.loyalty, packedCoord);
 
     if (mpFlag == 0) {
-        auto SpawnSP = (tSpawnPeepSP)(g_baseAddress + OFFSET_SPAWN_PEEP_SP);
+        auto SpawnSP = (tSpawnPeepSP)(g_baseAddress + g_offsets.spawnPeepSP);
         SpawnSP(0, &packedCoord, cmd.id, 0, pPlayer, &attr);
     }
     else {
-        auto SpawnMP = (tSpawnPeepMP)(g_baseAddress + OFFSET_SPAWN_PEEP_MP);
+        auto SpawnMP = (tSpawnPeepMP)(g_baseAddress + g_offsets.spawnPeepMP);
         SpawnMP(0, &packedCoord, (int)cmd.id, 0, pPlayer, (int*)&attr);
     }
 }
@@ -659,7 +812,7 @@ void ExecuteSpawnCrate(void* pPlayer, unsigned int cargoTypeId, unsigned int ext
 {
     if (cargoTypeId < 1 || cargoTypeId > 17) return;
 
-    auto SpawnPortable = (tSpawnPortable)(g_baseAddress + OFFSET_SPAWN_PORTABLE);
+    auto SpawnPortable = (tSpawnPortable)(g_baseAddress + g_offsets.spawnPortable);
     unsigned int packedCoord = GetSafePlayerTile(pPlayer, localX, localZ, deck);
     int flag = (cargoTypeId == 0xB || cargoTypeId == 0xC) ? 0 : 1;
 
@@ -671,11 +824,11 @@ void ExecuteSpawnCrate(void* pPlayer, unsigned int cargoTypeId, unsigned int ext
 }
 
 // ==============================================================================
-// Live BUILD SLONGS & BUILD FLOATS Discovery & Editor (DAT_00a8387c / 00a83880)
+// Live BUILD SLONGS & BUILD FLOATS Discovery & Editor
 // ==============================================================================
 struct BuildVarEntry {
     std::string name;
-    int category;      // 1=Segments & Station, 2=Factory & Cargo, 3=Rooms & Furniture, 4=Droids & Peeps, 5=Combat & AI, 6=Economy & Costs, 7=Environment & Misc
+    int category;
     bool isFloat;
     void* pValueAddr;
     int defaultInt;
@@ -705,28 +858,28 @@ int ClassifyBuildVarCategory(const char* name)
 {
     if (strstr(name, "SEG") || strstr(name, "SEGMENT") || strstr(name, "STATION_YUMNESS") ||
         strstr(name, "ENERGY_HEALTHY") || strstr(name, "ENERGY_YELLOW")) {
-        return 1; // Segments & Station
+        return 1;
     }
     if (strstr(name, "CARGO_") || strstr(name, "VENDOR_") || strstr(name, "SHOP_")) {
-        return 2; // Factory & Cargo
+        return 2;
     }
     if (strstr(name, "ROOM_") || strstr(name, "FURNITURE_") || strstr(name, "COLLECTOR_")) {
-        return 3; // Rooms & Furniture
+        return 3;
     }
     if (strstr(name, "SCUTTER_") || strstr(name, "SCUZZER_") || strstr(name, "PEEP_") ||
         strstr(name, "PENITENT_") || strstr(name, "GEMSLUG_") || strstr(name, "MEMAU_") ||
         strstr(name, "DISEASE_") || strstr(name, "TRADER_")) {
-        return 4; // Droids & Peeps
+        return 4;
     }
     if (strstr(name, "AI_") || strstr(name, "LASER") || strstr(name, "BLAST_") ||
         strstr(name, "CRIMINALS_") || strstr(name, "DISABLE_WAR") || strstr(name, "GUNNER2_") ||
         strstr(name, "SPAWN_ROOM")) {
-        return 5; // Combat & AI
+        return 5;
     }
     if (strstr(name, "COST") || strstr(name, "RRP") || strstr(name, "PROFIT") || strstr(name, "HANDOUT")) {
-        return 6; // Economy & Costs
+        return 6;
     }
-    return 7; // Environment & Misc
+    return 7;
 }
 
 void ComputeSmartRangeInt(const char* name, int defVal, int& outMin, int& outMax)
@@ -776,8 +929,7 @@ int ReadBuildVarsRaw(RawBuildNode* outNodes, int maxNodes)
 {
     int count = 0;
     __try {
-        // 1. Walk BUILD SLONGS linked list (DAT_00a8387c)
-        DWORD node = *(DWORD*)(g_baseAddress + OFFSET_BUILD_SLONGS_LIST);
+        DWORD node = *(DWORD*)(g_baseAddress + g_offsets.buildSlongsList);
         int guard = 0;
         while (node != 0 && node > 0x10000 && guard++ < 2048 && count < maxNodes) {
             const char* varName = *(const char**)(node + 0x0C);
@@ -788,8 +940,7 @@ int ReadBuildVarsRaw(RawBuildNode* outNodes, int maxNodes)
             node = *(DWORD*)(node + 0x08);
         }
 
-        // 2. Walk BUILD FLOATS linked list (DAT_00a83880)
-        node = *(DWORD*)(g_baseAddress + OFFSET_BUILD_FLOATS_LIST);
+        node = *(DWORD*)(g_baseAddress + g_offsets.buildFloatsList);
         guard = 0;
         while (node != 0 && node > 0x10000 && guard++ < 2048 && count < maxNodes) {
             const char* varName = *(const char**)(node + 0x0C);
@@ -866,7 +1017,7 @@ bool MatchesBuildFilter(const BuildVarEntry& entry, int catFilter, const char* s
 
 void ProcessCommandQueueOnMainThread()
 {
-    void* pPlayer = *(void**)(g_baseAddress + OFFSET_PLAYER_PTR);
+    void* pPlayer = *(void**)(g_baseAddress + g_offsets.playerPtr);
     if (pPlayer == nullptr) {
         std::lock_guard<std::mutex> lock(g_cmdMutex);
         if (!g_cmdQueue.empty()) {
@@ -947,7 +1098,6 @@ enum MenuControlIDs {
     IDC_CHK_ALWAYS_ON_TOP = 99,
     IDC_MAIN_TAB = 100,
 
-    // Tab 0: Energy/Tech
     IDC_BTN_NRG_ADD_50K = 1001,
     IDC_BTN_NRG_ADD_500K,
     IDC_BTN_NRG_SUB_50K,
@@ -959,7 +1109,6 @@ enum MenuControlIDs {
     IDC_BTN_NRG_UNLOCK_ALL_TECH,
     IDC_LBL_NRG_TECH_NOTE,
 
-    // Tab 1: Peeps
     IDC_LBL_PEEP_TYPE = 2001,
     IDC_COMBO_PEEP_TYPE,
     IDC_LBL_PEEP_DECK,
@@ -979,7 +1128,6 @@ enum MenuControlIDs {
     IDC_EDIT_PEEP_LOYALTY,
     IDC_BTN_PEEP_SPAWN,
 
-    // Tab 2: Crates
     IDC_LBL_CRATE_TYPE = 3001,
     IDC_COMBO_CRATE_TYPE,
     IDC_LBL_CRATE_SUBTYPE,
@@ -995,7 +1143,6 @@ enum MenuControlIDs {
     IDC_BTN_CRATE_SPAWN,
     IDC_BTN_CRATE_SPAWN_ALL_STD,
 
-    // Tab 3: Build Changers
     IDC_COMBO_BUILD_CAT = 4001,
     IDC_EDIT_BUILD_SEARCH,
     IDC_COMBO_BUILD_VAR,
@@ -1006,7 +1153,6 @@ enum MenuControlIDs {
     IDC_LBL_BUILD_INFO,
     IDC_LBL_BUILD_WARNING,
 
-    // Tab 4: Help/About
     IDC_LBL_HELP_TEXT = 5001
 };
 
@@ -1186,7 +1332,6 @@ LRESULT CALLBACK ClassicMenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, "Segoe UI");
 
-        // "Always on top" checkbox positioned above the tab bar
         HWND hChkTop = CreateWindowA("BUTTON", "Always on top",
             WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE | BS_AUTOCHECKBOX,
             12, 6, 150, 22, hwnd, (HMENU)IDC_CHK_ALWAYS_ON_TOP, nullptr, nullptr);
@@ -1226,11 +1371,6 @@ LRESULT CALLBACK ClassicMenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             22, 174, 215, 26, hwnd, (HMENU)IDC_EDIT_NRG_CUSTOM, nullptr, nullptr);
         CreateWindowA("BUTTON", "Apply Energy", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
             247, 172, 199, 30, hwnd, (HMENU)IDC_BTN_NRG_APPLY_CUSTOM, nullptr, nullptr);
-
-        //HWND hChkFreeSeg = CreateWindowA("BUTTON", "Free New Segments (10,000e Instant Refund)",
-        //    WS_CHILD | WS_CLIPSIBLINGS | BS_AUTOCHECKBOX,
-        //    22, 212, 424, 24, hwnd, (HMENU)IDC_CHK_NRG_FREE_SEGMENTS, nullptr, nullptr);
-        //SendMessageA(hChkFreeSeg, BM_SETCHECK, g_freeNewSegments ? BST_CHECKED : BST_UNCHECKED, 0);
 
         CreateWindowA("BUTTON", "Unlock all tech", WS_CHILD | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
             22, 246, 424, 34, hwnd, (HMENU)IDC_BTN_NRG_UNLOCK_ALL_TECH, nullptr, nullptr);
@@ -1377,7 +1517,7 @@ LRESULT CALLBACK ClassicMenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         char helpBuf[768];
         sprintf_s(helpBuf,
             "Startopia Cheeseburger Menu v1.0 (Classic Win32 UI)\n"
-            "Build Date: 11/18/2026\n"
+            "Build Date: 11/19/2026 | Game: %s\n"
             "Powered by Dear ImGui & MinHook\n"
             "Dedicated to Chris Nelson.\n\n"
             "• [%s] : Show / Hide this Menu Overlay\n"
@@ -1385,6 +1525,7 @@ LRESULT CALLBACK ClassicMenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             "• Deck 0 = Sub Deck | Deck 1 = Leisure | Deck 2 = Bio\n"
             "• Batch Spawning: Spawns 1 to 50 entities on a clean paced grid\n"
             "  starting at your chosen Tile X / Tile Y coordinates.\n",
+            g_offsets.versionLabel,
             g_config.hotkeyName);
         CreateWindowA("STATIC", helpBuf, WS_CHILD | WS_CLIPSIBLINGS,
             22, 72, 425, 310, hwnd, (HMENU)IDC_LBL_HELP_TEXT, nullptr, nullptr);
@@ -1721,10 +1862,11 @@ void RenderImGuiMenuContents()
     ImGui::Begin("Startopia Cheeseburger Menu", nullptr, flags);
     ImGui::PushTextWrapPos(0.0f);
 
-    // "Always on top" checkbox above the tab bar
     if (ImGui::Checkbox("Always on top", &g_alwaysOnTop)) {
         ApplyMenuAlwaysOnTop(g_alwaysOnTop);
     }
+    ImGui::SameLine();
+    ImGui::TextDisabled("  |  Game Build: %s", g_offsets.versionLabel);
     ImGui::Separator();
 
     if (ImGui::BeginTabBar("CheeseburgerTabs")) {
@@ -1762,9 +1904,6 @@ void RenderImGuiMenuContents()
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
-
-            //ImGui::Checkbox("Free New Segments (10,000e Instant Refund)", &g_freeNewSegments);
-            //ImGui::Spacing();
 
             if (ImGui::Button("Unlock all tech", ImVec2(510, 36))) {
                 EnqueueCommand({ CMD_UNLOCK_ALL_TECH, 0, 0, 0, 0, 0, 0, false, 0, 0, 0 });
@@ -2118,8 +2257,8 @@ void RenderImGuiMenuContents()
         if (ImGui::BeginTabItem("Help/About")) {
             ImGui::Spacing();
             ImGui::TextUnformatted("Startopia Cheeseburger Menu v1.0 (Dear ImGui DX11 Overlay)");
-            ImGui::TextDisabled("Build Date: 11/18/2026  |  Powered by Dear ImGui & MinHook");
-            ImGui::TextDisabled("Dedicated to Chris Nelson.");
+            ImGui::TextDisabled("Build Date: 11/19/2026  |  Game: %s", g_offsets.versionLabel);
+            ImGui::TextDisabled("Powered by Dear ImGui & MinHook  |  Dedicated to Chris Nelson.");
             ImGui::Separator();
             ImGui::Spacing();
             ImGui::BulletText("[%s] : Show / Hide this Menu Overlay", g_config.hotkeyName);
@@ -2248,6 +2387,8 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
 
     g_baseAddress = (DWORD)GetModuleHandle(NULL);
     LogMsg("Startopia Base Address: 0x%08X\n", g_baseAddress);
+    DetectGameVersion();
+
     LogMsg("Loaded INI: ToggleConsole=%d | UseImGUI=%d | Hotkey=%s (0x%02X) | OutputCrashLog=%d | ShowMenuOnStart=%d\n",
         g_config.toggleConsole ? 1 : 0,
         g_config.useImGUI ? 1 : 0,
@@ -2255,14 +2396,15 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
         g_config.outputCrashLog ? 1 : 0,
         g_config.showMenuOnStart ? 1 : 0);
 
-    if (MH_Initialize() == MH_OK || MH_Initialize() == MH_ERROR_ALREADY_INITIALIZED) {
-        void* pTargetDeduct = (void*)(g_baseAddress + OFFSET_DEDUCT_ENERGY);
+    if (g_offsets.deductEnergy != 0 &&
+        (MH_Initialize() == MH_OK || MH_Initialize() == MH_ERROR_ALREADY_INITIALIZED)) {
+        void* pTargetDeduct = (void*)(g_baseAddress + g_offsets.deductEnergy);
         if (MH_CreateHook(pTargetDeduct, &HookedDeductEnergy, (LPVOID*)&pOriginalDeductEnergy) == MH_OK &&
             MH_EnableHook(pTargetDeduct) == MH_OK) {
-            LogMsg("Hooked FUN_005aea80 (Energy Deduction / Segment Refund) at 0x%p\n", pTargetDeduct);
+            LogMsg("Hooked DeductEnergy at 0x%p\n", pTargetDeduct);
         }
         else {
-            LogMsg("[WARN] Failed to hook FUN_005aea80 (Segment Refund).\n");
+            LogMsg("[WARN] Failed to hook DeductEnergy.\n");
         }
     }
 
@@ -2310,6 +2452,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
+        InstallAutoWindowedArgHook();
         CreateThread(nullptr, 0, MainThread, hModule, 0, nullptr);
     }
     return TRUE;
