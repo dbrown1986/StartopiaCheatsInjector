@@ -1,7 +1,7 @@
 # Startopia Cheeseburger Menu
 
-**Current Version:** 1.0.1
-**Build Date:** 11/18/2026
+**Current Version:** 1.1.0
+**Build Date:** 11/19/2026
 
 An in-game cheat and sandbox manipulation overlay for **Startopia** (Steam `1.01.1-b3`). Rather than relying on static mission text scripts (`mishXX.txt`), this mod uses a `version.dll` proxy and **MinHook** to execute internal engine functions directly on the main game thread via a **Dear ImGui** overlay (with a Classic Win32 GDI fallback).
 
@@ -9,6 +9,7 @@ The menu is designed as external, ImGui does not have native support for DirectX
 
 ## Supported Versions
 
+1.01.1-b3 (beta)
 1.01.1-b3 (beta_debug)
 
 ## Dedicated to Chris Nelson
