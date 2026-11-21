@@ -706,7 +706,7 @@ struct GameOffsets {
 
 // Profile 0: Startopia Steam 1.01 (TimeDateStamp: 0x3B727110)
 static const GameOffsets OFFSETS_STEAM_1_01 = {
-    "Steam 1.01 (0x3B727110)",
+    "Steam/GOG 1.01 (0x3B727110)",
     0x00000000, // deductEnergy (disabled)
     0x000A0F60, // FUN_004a0f60
     0x00104940, // FUN_00504940
