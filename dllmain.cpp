@@ -2,6 +2,8 @@
 #include <commctrl.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <ddraw.h>
+#include <Psapi.h>
 #include <cstdio>
 #include <cstdarg>
 #include <cstdlib>
@@ -21,6 +23,7 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "Psapi.lib")
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -46,35 +49,204 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 #pragma comment(linker, "/EXPORT:VerQueryValueW=C:\\Windows\\System32\\version.VerQueryValueW")
 
 // ==============================================================================
-// Automatic Native Windowed Mode (/r) Injector via GetCommandLineA IAT Hook
+// Global Configuration & Runtime State
 // ==============================================================================
+struct ModConfig {
+    bool toggleConsole = false;
+    bool useImGUI = true;
+    int  hotkeyVK = VK_F12;
+    char hotkeyName[32] = "F12";
+    bool outputCrashLog = true;
+    bool showMenuOnStart = true;
+    bool forceWindowed = true;
+};
+
+ModConfig g_config;
+
+DWORD   g_baseAddress = 0;
+FILE* g_logFile = nullptr;
+HWND    g_gameHwnd = nullptr;
+WNDPROC pOriginalGameWndProc = nullptr;
+HWND    g_menuHwnd = nullptr;
+HWND    g_tabHwnd = nullptr;
+HFONT   g_uiFont = nullptr;
+bool    g_menuVisible = true;
+bool    g_alwaysOnTop = true;
+bool    g_freeNewSegments = false;
+static RECT g_savedMenuRect = { 35, 35, 580, 540 };
+
+#define GAME_QUEUE_TIMER_ID 0x5A70
+#define BORDERLESS_STYLE (WS_POPUP | WS_CLIPCHILDREN | WS_VISIBLE)
+
+void ProcessCommandQueueOnMainThread();
+
+void LogMsg(const char* fmt, ...)
+{
+    if (!g_config.toggleConsole && (!g_config.outputCrashLog || g_logFile == nullptr)) {
+        return;
+    }
+
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+
+    char msgBuf[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(msgBuf, sizeof(msgBuf), fmt, args);
+    va_end(args);
+
+    char finalBuf[1200];
+    snprintf(finalBuf, sizeof(finalBuf), "[%04d-%02d-%02d %02d:%02d:%02d.%03d] %s",
+        st.wYear, st.wMonth, st.wDay,
+        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+        msgBuf);
+
+    if (g_config.toggleConsole) {
+        printf("%s", finalBuf);
+    }
+    if (g_config.outputCrashLog && g_logFile) {
+        fprintf(g_logFile, "%s", finalBuf);
+        fflush(g_logFile);
+    }
+}
+
+void SetMenuVisibility(bool visible)
+{
+    g_menuVisible = visible;
+    if (!g_menuHwnd) return;
+
+    if (!visible) {
+        RECT rc{};
+        if (GetWindowRect(g_menuHwnd, &rc) && rc.left > -10000) {
+            g_savedMenuRect = rc;
+        }
+        SetWindowPos(g_menuHwnd, nullptr, -32000, -32000, 0, 0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
+    }
+    else {
+        SetWindowPos(g_menuHwnd, g_alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
+            g_savedMenuRect.left, g_savedMenuRect.top, 0, 0,
+            SWP_NOSIZE | SWP_SHOWWINDOW);
+    }
+}
+
+// ==============================================================================
+// Subclassed Game Main-Thread WndProc (Command Queue + Borderless Frame + Cursor)
+// ==============================================================================
+typedef LONG(WINAPI* tSetWindowLongA)(HWND hWnd, int nIndex, LONG dwNewLong);
+tSetWindowLongA pOriginalSetWindowLongA = nullptr;
+
+LONG WINAPI hkSetWindowLongA(HWND hWnd, int nIndex, LONG dwNewLong)
+{
+    if (g_config.forceWindowed && nIndex == GWL_STYLE && hWnd != nullptr && hWnd == g_gameHwnd) {
+        dwNewLong = (LONG)BORDERLESS_STYLE;
+    }
+    return pOriginalSetWindowLongA(hWnd, nIndex, dwNewLong);
+}
+
+LRESULT CALLBACK SubclassGameWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    if (uMsg == WM_TIMER && wParam == GAME_QUEUE_TIMER_ID) {
+        ProcessCommandQueueOnMainThread();
+    }
+    else if (g_config.forceWindowed) {
+        if (uMsg == WM_ERASEBKGND) {
+            return 1;
+        }
+        if (uMsg == WM_STYLECHANGING && wParam == GWL_STYLE) {
+            STYLESTRUCT* ss = (STYLESTRUCT*)lParam;
+            if (ss) {
+                ss->styleNew = (DWORD)BORDERLESS_STYLE;
+            }
+            return 0;
+        }
+        if (uMsg == WM_SETCURSOR && LOWORD(lParam) == HTCLIENT) {
+            SetCursor(nullptr);
+            return TRUE;
+        }
+        if (uMsg == WM_CLOSE) {
+            PostQuitMessage(0);
+            ExitProcess(0);
+        }
+    }
+    return CallWindowProcA(pOriginalGameWndProc, hwnd, uMsg, wParam, lParam);
+}
+
+// ==============================================================================
+// Self-Contained DirectDraw7 Windowed Mode + Flip->Blt Emulation (All Builds)
+// ==============================================================================
+BYTE* g_pRetailFlag = nullptr;
+DWORD* g_pWindowedFlag = nullptr;
+HWND   g_ddHwnd = nullptr;
+DWORD  g_reqWidth = 1024;
+DWORD  g_reqHeight = 768;
+
+IDirectDraw7* g_pDD7 = nullptr;
+IDirectDrawSurface7* g_pFakePrimary = nullptr;
+IDirectDrawSurface7* g_pFakeBackBuffer = nullptr;
+
 typedef LPSTR(WINAPI* tGetCommandLineA)(void);
 tGetCommandLineA pOriginalGetCommandLineA = nullptr;
 static char g_patchedCmdLine[2048]{};
 static bool g_cmdLinePatched = false;
 
-LPSTR WINAPI hkGetCommandLineA()
-{
-    LPSTR orig = pOriginalGetCommandLineA ? pOriginalGetCommandLineA() : GetCommandLineA();
-    if (!orig) return orig;
+typedef HRESULT(WINAPI* tDirectDrawCreateEx)(GUID* lpGuid, LPVOID* lplpDD, REFIID iid, IUnknown* pUnkOuter);
+tDirectDrawCreateEx pOriginalDirectDrawCreateEx = nullptr;
 
-    if (!g_cmdLinePatched) {
-        strncpy_s(g_patchedCmdLine, orig, sizeof(g_patchedCmdLine) - 16);
-        // Append /r if the user did not already pass /r or /f on the command line
-        bool hasWindowArg = false;
-        for (const char* p = g_patchedCmdLine; *p; ++p) {
-            if ((*p == '/' || *p == '-') &&
-                (p[1] == 'r' || p[1] == 'R' || p[1] == 'f' || p[1] == 'F')) {
-                hasWindowArg = true;
+typedef HRESULT(STDMETHODCALLTYPE* tDD7_CreateSurface)(IDirectDraw7* pDD, LPDDSURFACEDESC2 lpDesc, LPDIRECTDRAWSURFACE7* lplpSurf, IUnknown* pUnk);
+typedef HRESULT(STDMETHODCALLTYPE* tDD7_GetDisplayMode)(IDirectDraw7* pDD, LPDDSURFACEDESC2 lpDesc);
+typedef HRESULT(STDMETHODCALLTYPE* tDD7_SetCooperativeLevel)(IDirectDraw7* pDD, HWND hWnd, DWORD dwFlags);
+typedef HRESULT(STDMETHODCALLTYPE* tDD7_SetDisplayMode)(IDirectDraw7* pDD, DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwRefreshRate, DWORD dwFlags);
+
+typedef HRESULT(STDMETHODCALLTYPE* tDDS7_Blt)(IDirectDrawSurface7* pSurf, LPRECT lpDestRect, LPDIRECTDRAWSURFACE7 lpDDSrcSurface, LPRECT lpSrcRect, DWORD dwFlags, LPDDBLTFX lpDDBltFx);
+typedef HRESULT(STDMETHODCALLTYPE* tDDS7_BltFast)(IDirectDrawSurface7* pSurf, DWORD dwX, DWORD dwY, LPDIRECTDRAWSURFACE7 lpDDSrcSurface, LPRECT lpSrcRect, DWORD dwTrans);
+typedef HRESULT(STDMETHODCALLTYPE* tDDS7_Flip)(IDirectDrawSurface7* pSurf, LPDIRECTDRAWSURFACE7 lpTargetOverride, DWORD dwFlags);
+typedef HRESULT(STDMETHODCALLTYPE* tDDS7_GetAttachedSurface)(IDirectDrawSurface7* pSurf, LPDDSCAPS2 lpCaps, LPDIRECTDRAWSURFACE7* lplpAttached);
+typedef HRESULT(STDMETHODCALLTYPE* tDDS7_GetDC)(IDirectDrawSurface7* pSurf, HDC* lphDC);
+typedef HRESULT(STDMETHODCALLTYPE* tDDS7_Lock)(IDirectDrawSurface7* pSurf, LPRECT lpDestRect, LPDDSURFACEDESC2 lpDDSurfaceDesc, DWORD dwFlags, HANDLE hEvent);
+typedef HRESULT(STDMETHODCALLTYPE* tDDS7_ReleaseDC)(IDirectDrawSurface7* pSurf, HDC hDC);
+typedef HRESULT(STDMETHODCALLTYPE* tDDS7_Restore)(IDirectDrawSurface7* pSurf);
+typedef HRESULT(STDMETHODCALLTYPE* tDDS7_Unlock)(IDirectDrawSurface7* pSurf, LPRECT lpRect);
+
+tDD7_CreateSurface       pOriginalDD7CreateSurface = nullptr;
+tDD7_GetDisplayMode      pOriginalDD7GetDisplayMode = nullptr;
+tDD7_SetCooperativeLevel pOriginalDD7SetCooperativeLevel = nullptr;
+tDD7_SetDisplayMode      pOriginalDD7SetDisplayMode = nullptr;
+
+tDDS7_Blt                pOriginalDDS7Blt = nullptr;
+tDDS7_BltFast            pOriginalDDS7BltFast = nullptr;
+tDDS7_Flip               pOriginalDDS7Flip = nullptr;
+tDDS7_GetAttachedSurface pOriginalDDS7GetAttachedSurface = nullptr;
+tDDS7_GetDC              pOriginalDDS7GetDC = nullptr;
+tDDS7_Lock               pOriginalDDS7Lock = nullptr;
+tDDS7_ReleaseDC          pOriginalDDS7ReleaseDC = nullptr;
+tDDS7_Restore            pOriginalDDS7Restore = nullptr;
+tDDS7_Unlock             pOriginalDDS7Unlock = nullptr;
+
+static bool g_dd7VtableHooked = false;
+static bool g_dds7VtableHooked = false;
+
+BYTE* FindPatternInModule(HMODULE hMod, const BYTE* pattern, const char* mask)
+{
+    MODULEINFO modInfo{};
+    if (!GetModuleInformation(GetCurrentProcess(), hMod, &modInfo, sizeof(modInfo)))
+        return nullptr;
+
+    BYTE* base = (BYTE*)modInfo.lpBaseOfDll;
+    size_t size = modInfo.SizeOfImage;
+    size_t patLen = strlen(mask);
+
+    for (size_t i = 0; i + patLen < size; i++) {
+        bool match = true;
+        for (size_t j = 0; j < patLen; j++) {
+            if (mask[j] == 'x' && base[i + j] != pattern[j]) {
+                match = false;
                 break;
             }
         }
-        if (!hasWindowArg) {
-            strcat_s(g_patchedCmdLine, " /r");
-        }
-        g_cmdLinePatched = true;
+        if (match) return base + i;
     }
-    return g_patchedCmdLine;
+    return nullptr;
 }
 
 bool HookModuleIAT(HMODULE hMod, const char* targetDll, const char* funcName, void* detour, void** originalOut)
@@ -114,16 +286,406 @@ bool HookModuleIAT(HMODULE hMod, const char* targetDll, const char* funcName, vo
     return false;
 }
 
-void InstallAutoWindowedArgHook()
+LPSTR WINAPI hkGetCommandLineA()
+{
+    LPSTR orig = pOriginalGetCommandLineA ? pOriginalGetCommandLineA() : GetCommandLineA();
+    if (!orig || !g_config.forceWindowed) return orig;
+
+    if (!g_cmdLinePatched) {
+        strncpy_s(g_patchedCmdLine, orig, sizeof(g_patchedCmdLine) - 16);
+        bool hasWindowArg = false;
+        for (const char* p = g_patchedCmdLine; *p; ++p) {
+            if ((*p == '/' || *p == '-') &&
+                (p[1] == 'r' || p[1] == 'R' || p[1] == 'f' || p[1] == 'F')) {
+                hasWindowArg = true;
+                break;
+            }
+        }
+        if (!hasWindowArg) {
+            strcat_s(g_patchedCmdLine, " /r");
+        }
+        g_cmdLinePatched = true;
+    }
+    return g_patchedCmdLine;
+}
+
+RECT NormalizeDestRectForBackBuffer(const RECT& rawRect)
+{
+    RECT out = rawRect;
+    HWND targetHwnd = g_ddHwnd ? g_ddHwnd : g_gameHwnd;
+    if (targetHwnd && IsWindow(targetHwnd)) {
+        POINT ptTopLeft = { 0, 0 };
+        ClientToScreen(targetHwnd, &ptTopLeft);
+        if ((ptTopLeft.x > 0 || ptTopLeft.y > 0) &&
+            out.left >= ptTopLeft.x && out.top >= ptTopLeft.y &&
+            (out.right > (LONG)g_reqWidth || out.bottom > (LONG)g_reqHeight)) {
+            out.left -= ptTopLeft.x;
+            out.top -= ptTopLeft.y;
+            out.right -= ptTopLeft.x;
+            out.bottom -= ptTopLeft.y;
+        }
+    }
+    return out;
+}
+
+HRESULT STDMETHODCALLTYPE hkDDS7_Blt(
+    IDirectDrawSurface7* pSurf, LPRECT lpDestRect, LPDIRECTDRAWSURFACE7 lpDDSrcSurface,
+    LPRECT lpSrcRect, DWORD dwFlags, LPDDBLTFX lpDDBltFx)
+{
+    if (g_config.forceWindowed && pSurf == g_pFakePrimary &&
+        g_pFakeBackBuffer != nullptr && lpDDSrcSurface != g_pFakeBackBuffer) {
+        if (lpDestRect != nullptr) {
+            RECT localDest = NormalizeDestRectForBackBuffer(*lpDestRect);
+            return pOriginalDDS7Blt(g_pFakeBackBuffer, &localDest, lpDDSrcSurface, lpSrcRect, dwFlags, lpDDBltFx);
+        }
+        return pOriginalDDS7Blt(g_pFakeBackBuffer, nullptr, lpDDSrcSurface, lpSrcRect, dwFlags, lpDDBltFx);
+    }
+    return pOriginalDDS7Blt(pSurf, lpDestRect, lpDDSrcSurface, lpSrcRect, dwFlags, lpDDBltFx);
+}
+
+HRESULT STDMETHODCALLTYPE hkDDS7_BltFast(
+    IDirectDrawSurface7* pSurf, DWORD dwX, DWORD dwY, LPDIRECTDRAWSURFACE7 lpDDSrcSurface,
+    LPRECT lpSrcRect, DWORD dwTrans)
+{
+    if (g_config.forceWindowed && pSurf == g_pFakePrimary && g_pFakeBackBuffer != nullptr) {
+        return pOriginalDDS7BltFast(g_pFakeBackBuffer, dwX, dwY, lpDDSrcSurface, lpSrcRect, dwTrans);
+    }
+    return pOriginalDDS7BltFast(pSurf, dwX, dwY, lpDDSrcSurface, lpSrcRect, dwTrans);
+}
+
+HRESULT STDMETHODCALLTYPE hkDDS7_Lock(
+    IDirectDrawSurface7* pSurf, LPRECT lpDestRect, LPDDSURFACEDESC2 lpDDSurfaceDesc, DWORD dwFlags, HANDLE hEvent)
+{
+    if (g_config.forceWindowed && pSurf == g_pFakePrimary && g_pFakeBackBuffer != nullptr) {
+        if (lpDestRect != nullptr) {
+            RECT localDest = NormalizeDestRectForBackBuffer(*lpDestRect);
+            return pOriginalDDS7Lock(g_pFakeBackBuffer, &localDest, lpDDSurfaceDesc, dwFlags, hEvent);
+        }
+        return pOriginalDDS7Lock(g_pFakeBackBuffer, nullptr, lpDDSurfaceDesc, dwFlags, hEvent);
+    }
+    return pOriginalDDS7Lock(pSurf, lpDestRect, lpDDSurfaceDesc, dwFlags, hEvent);
+}
+
+HRESULT STDMETHODCALLTYPE hkDDS7_Unlock(IDirectDrawSurface7* pSurf, LPRECT lpRect)
+{
+    if (g_config.forceWindowed && pSurf == g_pFakePrimary && g_pFakeBackBuffer != nullptr) {
+        return pOriginalDDS7Unlock(g_pFakeBackBuffer, nullptr);
+    }
+    return pOriginalDDS7Unlock(pSurf, lpRect);
+}
+
+HRESULT STDMETHODCALLTYPE hkDDS7_GetDC(IDirectDrawSurface7* pSurf, HDC* lphDC)
+{
+    if (g_config.forceWindowed && pSurf == g_pFakePrimary && g_pFakeBackBuffer != nullptr) {
+        return pOriginalDDS7GetDC(g_pFakeBackBuffer, lphDC);
+    }
+    return pOriginalDDS7GetDC(pSurf, lphDC);
+}
+
+HRESULT STDMETHODCALLTYPE hkDDS7_ReleaseDC(IDirectDrawSurface7* pSurf, HDC hDC)
+{
+    if (g_config.forceWindowed && pSurf == g_pFakePrimary && g_pFakeBackBuffer != nullptr) {
+        return pOriginalDDS7ReleaseDC(g_pFakeBackBuffer, hDC);
+    }
+    return pOriginalDDS7ReleaseDC(pSurf, hDC);
+}
+
+HRESULT STDMETHODCALLTYPE hkDDS7_Flip(IDirectDrawSurface7* pSurf, LPDIRECTDRAWSURFACE7 lpTargetOverride, DWORD dwFlags)
+{
+    if (g_config.forceWindowed && pSurf == g_pFakePrimary && g_pFakeBackBuffer != nullptr) {
+        HWND targetHwnd = g_ddHwnd ? g_ddHwnd : (g_gameHwnd ? g_gameHwnd : FindWindowA("Startopia", nullptr));
+        if (targetHwnd && IsWindow(targetHwnd)) {
+            RECT rcClient{};
+            GetClientRect(targetHwnd, &rcClient);
+            POINT ptTopLeft = { rcClient.left, rcClient.top };
+            POINT ptBotRight = { rcClient.right, rcClient.bottom };
+            ClientToScreen(targetHwnd, &ptTopLeft);
+            ClientToScreen(targetHwnd, &ptBotRight);
+            RECT rcDest = { ptTopLeft.x, ptTopLeft.y, ptBotRight.x, ptBotRight.y };
+
+            if (rcDest.right > rcDest.left && rcDest.bottom > rcDest.top) {
+                if (g_pDD7 && (dwFlags & DDFLIP_NOVSYNC) == 0) {
+                    g_pDD7->WaitForVerticalBlank(DDWAITVB_BLOCKBEGIN, nullptr);
+                }
+                return pOriginalDDS7Blt(g_pFakePrimary, &rcDest, g_pFakeBackBuffer, nullptr, DDBLT_WAIT, nullptr);
+            }
+        }
+        return DD_OK;
+    }
+    return pOriginalDDS7Flip(pSurf, lpTargetOverride, dwFlags);
+}
+
+HRESULT STDMETHODCALLTYPE hkDDS7_GetAttachedSurface(
+    IDirectDrawSurface7* pSurf, LPDDSCAPS2 lpCaps, LPDIRECTDRAWSURFACE7* lplpAttached)
+{
+    if (g_config.forceWindowed && pSurf == g_pFakePrimary && g_pFakeBackBuffer != nullptr && lplpAttached != nullptr) {
+        if (lpCaps && (lpCaps->dwCaps & DDSCAPS_BACKBUFFER)) {
+            g_pFakeBackBuffer->AddRef();
+            *lplpAttached = g_pFakeBackBuffer;
+            return DD_OK;
+        }
+    }
+    return pOriginalDDS7GetAttachedSurface(pSurf, lpCaps, lplpAttached);
+}
+
+HRESULT STDMETHODCALLTYPE hkDDS7_Restore(IDirectDrawSurface7* pSurf)
+{
+    HRESULT hr = pOriginalDDS7Restore(pSurf);
+    if (g_config.forceWindowed && pSurf == g_pFakePrimary && g_pFakeBackBuffer != nullptr) {
+        pOriginalDDS7Restore(g_pFakeBackBuffer);
+    }
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hkDD7_CreateSurface(
+    IDirectDraw7* pDD, LPDDSURFACEDESC2 lpDesc, LPDIRECTDRAWSURFACE7* lplpSurf, IUnknown* pUnk)
+{
+    if (g_config.forceWindowed && lpDesc && (lpDesc->ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE)) {
+        DDSURFACEDESC2 primDesc = *lpDesc;
+        bool wantedBackBuffer = (primDesc.ddsCaps.dwCaps & (DDSCAPS_FLIP | DDSCAPS_COMPLEX)) != 0 ||
+            ((primDesc.dwFlags & DDSD_BACKBUFFERCOUNT) && primDesc.dwBackBufferCount > 0);
+
+        primDesc.dwFlags &= ~DDSD_BACKBUFFERCOUNT;
+        primDesc.dwBackBufferCount = 0;
+        primDesc.ddsCaps.dwCaps &= ~(DDSCAPS_FLIP | DDSCAPS_COMPLEX | DDSCAPS_3DDEVICE);
+
+        HRESULT hr = pOriginalDD7CreateSurface(pDD, &primDesc, lplpSurf, pUnk);
+        if (FAILED(hr) || !lplpSurf || !*lplpSurf) {
+            LogMsg("[DX7-HOOK] Windowed Primary CreateSurface failed: 0x%08X\n", hr);
+            return hr;
+        }
+
+        g_pFakePrimary = *lplpSurf;
+
+        HWND targetHwnd = g_ddHwnd ? g_ddHwnd : (g_gameHwnd ? g_gameHwnd : FindWindowA("Startopia", nullptr));
+        if (targetHwnd) {
+            LPDIRECTDRAWCLIPPER pClipper = nullptr;
+            if (SUCCEEDED(pDD->CreateClipper(0, &pClipper, nullptr)) && pClipper) {
+                pClipper->SetHWnd(0, targetHwnd);
+                g_pFakePrimary->SetClipper(pClipper);
+                pClipper->Release();
+            }
+        }
+
+        if (wantedBackBuffer) {
+            if (g_pFakeBackBuffer) {
+                g_pFakeBackBuffer->Release();
+                g_pFakeBackBuffer = nullptr;
+            }
+
+            DDSURFACEDESC2 bbDesc{};
+            bbDesc.dwSize = sizeof(DDSURFACEDESC2);
+            bbDesc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+            bbDesc.dwWidth = (g_reqWidth > 0) ? g_reqWidth : 800;
+            bbDesc.dwHeight = (g_reqHeight > 0) ? g_reqHeight : 600;
+            bbDesc.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+
+            HRESULT bbHr = pOriginalDD7CreateSurface(pDD, &bbDesc, &g_pFakeBackBuffer, nullptr);
+            if (FAILED(bbHr)) {
+                bbDesc.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE;
+                bbHr = pOriginalDD7CreateSurface(pDD, &bbDesc, &g_pFakeBackBuffer, nullptr);
+            }
+            LogMsg("[DX7-HOOK] Created Windowed Primary + Offscreen 3D BackBuffer (%ux%u, hr=0x%08X)\n",
+                bbDesc.dwWidth, bbDesc.dwHeight, bbHr);
+        }
+
+        if (!g_dds7VtableHooked && g_pFakePrimary) {
+            void** surfVtable = *(void***)g_pFakePrimary;
+            if (surfVtable && surfVtable[5] && surfVtable[7] && surfVtable[11] && surfVtable[12] &&
+                surfVtable[17] && surfVtable[25] && surfVtable[26] && surfVtable[27] && surfVtable[32]) {
+                if (MH_CreateHook(surfVtable[5], (void*)&hkDDS7_Blt, (LPVOID*)&pOriginalDDS7Blt) == MH_OK &&
+                    MH_CreateHook(surfVtable[7], (void*)&hkDDS7_BltFast, (LPVOID*)&pOriginalDDS7BltFast) == MH_OK &&
+                    MH_CreateHook(surfVtable[11], (void*)&hkDDS7_Flip, (LPVOID*)&pOriginalDDS7Flip) == MH_OK &&
+                    MH_CreateHook(surfVtable[12], (void*)&hkDDS7_GetAttachedSurface, (LPVOID*)&pOriginalDDS7GetAttachedSurface) == MH_OK &&
+                    MH_CreateHook(surfVtable[17], (void*)&hkDDS7_GetDC, (LPVOID*)&pOriginalDDS7GetDC) == MH_OK &&
+                    MH_CreateHook(surfVtable[25], (void*)&hkDDS7_Lock, (LPVOID*)&pOriginalDDS7Lock) == MH_OK &&
+                    MH_CreateHook(surfVtable[26], (void*)&hkDDS7_ReleaseDC, (LPVOID*)&pOriginalDDS7ReleaseDC) == MH_OK &&
+                    MH_CreateHook(surfVtable[27], (void*)&hkDDS7_Restore, (LPVOID*)&pOriginalDDS7Restore) == MH_OK &&
+                    MH_CreateHook(surfVtable[32], (void*)&hkDDS7_Unlock, (LPVOID*)&pOriginalDDS7Unlock) == MH_OK) {
+                    MH_EnableHook(surfVtable[5]);
+                    MH_EnableHook(surfVtable[7]);
+                    MH_EnableHook(surfVtable[11]);
+                    MH_EnableHook(surfVtable[12]);
+                    MH_EnableHook(surfVtable[17]);
+                    MH_EnableHook(surfVtable[25]);
+                    MH_EnableHook(surfVtable[26]);
+                    MH_EnableHook(surfVtable[27]);
+                    MH_EnableHook(surfVtable[32]);
+                    g_dds7VtableHooked = true;
+                }
+            }
+        }
+        return DD_OK;
+    }
+
+    return pOriginalDD7CreateSurface(pDD, lpDesc, lplpSurf, pUnk);
+}
+
+HRESULT STDMETHODCALLTYPE hkDD7_GetDisplayMode(IDirectDraw7* pDD, LPDDSURFACEDESC2 lpDesc)
+{
+    HRESULT hr = pOriginalDD7GetDisplayMode(pDD, lpDesc);
+    if (g_config.forceWindowed && SUCCEEDED(hr) && lpDesc) {
+        lpDesc->dwFlags |= DDSD_PIXELFORMAT;
+        lpDesc->ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT);
+        lpDesc->ddpfPixelFormat.dwFlags = DDPF_RGB;
+        lpDesc->ddpfPixelFormat.dwRGBBitCount = 32;
+        lpDesc->ddpfPixelFormat.dwRBitMask = 0x00FF0000;
+        lpDesc->ddpfPixelFormat.dwGBitMask = 0x0000FF00;
+        lpDesc->ddpfPixelFormat.dwBBitMask = 0x000000FF;
+        lpDesc->ddpfPixelFormat.dwRGBAlphaBitMask = 0x00000000;
+    }
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hkDD7_SetCooperativeLevel(IDirectDraw7* pDD, HWND hWnd, DWORD dwFlags)
+{
+    if (hWnd != nullptr && IsWindow(hWnd)) {
+        g_ddHwnd = hWnd;
+    }
+
+    if (g_config.forceWindowed) {
+        if (g_pRetailFlag)   *g_pRetailFlag = 0;
+        if (g_pWindowedFlag) *g_pWindowedFlag = 1;
+
+        dwFlags &= ~(DDSCL_FULLSCREEN | DDSCL_EXCLUSIVE | DDSCL_ALLOWREBOOT);
+        dwFlags |= DDSCL_NORMAL;
+
+        if (hWnd != nullptr && IsWindow(hWnd)) {
+            if (g_gameHwnd == nullptr) {
+                g_gameHwnd = hWnd;
+            }
+            if (pOriginalGameWndProc == nullptr) {
+                pOriginalGameWndProc = (WNDPROC)SetWindowLongA(g_gameHwnd, GWL_WNDPROC, (LONG)SubclassGameWndProc);
+                SetTimer(g_gameHwnd, GAME_QUEUE_TIMER_ID, 100, nullptr);
+            }
+
+            RECT rc{};
+            GetClientRect(hWnd, &rc);
+            int clientW = (rc.right - rc.left > 0) ? (rc.right - rc.left) : 800;
+            int clientH = (rc.bottom - rc.top > 0) ? (rc.bottom - rc.top) : 600;
+
+            DWORD newStyle = BORDERLESS_STYLE;
+            if (pOriginalSetWindowLongA) {
+                pOriginalSetWindowLongA(hWnd, GWL_STYLE, (LONG)newStyle);
+            }
+            else {
+                SetWindowLongA(hWnd, GWL_STYLE, (LONG)newStyle);
+            }
+
+            int posX = (GetSystemMetrics(SM_CXSCREEN) - clientW) / 2;
+            int posY = (GetSystemMetrics(SM_CYSCREEN) - clientH) / 2;
+            if (posX < 0) posX = 0;
+            if (posY < 0) posY = 0;
+
+            SetWindowPos(hWnd, HWND_NOTOPMOST, posX, posY, clientW, clientH, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            ClipCursor(nullptr);
+        }
+        LogMsg("[DX7-HOOK] SetCooperativeLevel -> DDSCL_NORMAL (Borderless HWND=0x%p)\n", hWnd);
+    }
+
+    return pOriginalDD7SetCooperativeLevel(pDD, hWnd, dwFlags);
+}
+
+HRESULT STDMETHODCALLTYPE hkDD7_SetDisplayMode(
+    IDirectDraw7* pDD, DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwRefreshRate, DWORD dwFlags)
+{
+    if (dwWidth > 0)  g_reqWidth = dwWidth;
+    if (dwHeight > 0) g_reqHeight = dwHeight;
+
+    if (g_config.forceWindowed) {
+        LogMsg("[DX7-HOOK] Intercepted SetDisplayMode(%ux%ux%u @ %uHz)\n",
+            dwWidth, dwHeight, dwBPP, dwRefreshRate);
+
+        HWND targetHwnd = g_ddHwnd ? g_ddHwnd : (g_gameHwnd ? g_gameHwnd : FindWindowA("Startopia", nullptr));
+        if (targetHwnd && IsWindow(targetHwnd) && dwWidth > 0 && dwHeight > 0) {
+            DWORD style = BORDERLESS_STYLE;
+            if (pOriginalSetWindowLongA) {
+                pOriginalSetWindowLongA(targetHwnd, GWL_STYLE, (LONG)style);
+            }
+            int posX = (GetSystemMetrics(SM_CXSCREEN) - (int)dwWidth) / 2;
+            int posY = (GetSystemMetrics(SM_CYSCREEN) - (int)dwHeight) / 2;
+            if (posX < 0) posX = 0;
+            if (posY < 0) posY = 0;
+            SetWindowPos(targetHwnd, nullptr, posX, posY, (int)dwWidth, (int)dwHeight, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return DD_OK;
+    }
+
+    return pOriginalDD7SetDisplayMode(pDD, dwWidth, dwHeight, dwBPP, dwRefreshRate, dwFlags);
+}
+
+HRESULT WINAPI hkDirectDrawCreateEx(GUID* lpGuid, LPVOID* lplpDD, REFIID iid, IUnknown* pUnkOuter)
+{
+    HRESULT hr = pOriginalDirectDrawCreateEx(lpGuid, lplpDD, iid, pUnkOuter);
+    if (SUCCEEDED(hr) && lplpDD && *lplpDD) {
+        g_pDD7 = (IDirectDraw7*)(*lplpDD);
+        if (!g_dd7VtableHooked) {
+            void** vtable = *(void***)(*lplpDD);
+            if (vtable && vtable[6] && vtable[12] && vtable[20] && vtable[21]) {
+                if (MH_CreateHook(vtable[6], (void*)&hkDD7_CreateSurface, (LPVOID*)&pOriginalDD7CreateSurface) == MH_OK &&
+                    MH_CreateHook(vtable[12], (void*)&hkDD7_GetDisplayMode, (LPVOID*)&pOriginalDD7GetDisplayMode) == MH_OK &&
+                    MH_CreateHook(vtable[20], (void*)&hkDD7_SetCooperativeLevel, (LPVOID*)&pOriginalDD7SetCooperativeLevel) == MH_OK &&
+                    MH_CreateHook(vtable[21], (void*)&hkDD7_SetDisplayMode, (LPVOID*)&pOriginalDD7SetDisplayMode) == MH_OK) {
+                    MH_EnableHook(vtable[6]);
+                    MH_EnableHook(vtable[12]);
+                    MH_EnableHook(vtable[20]);
+                    MH_EnableHook(vtable[21]);
+                    g_dd7VtableHooked = true;
+                    LogMsg("[DX7-HOOK] Hooked IDirectDraw7 vtable (CreateSurface, GetDisplayMode, SetCooperativeLevel, SetDisplayMode)!\n");
+                }
+            }
+        }
+    }
+    return hr;
+}
+
+void InstallWindowedModeEnforcer()
 {
     HMODULE hExe = GetModuleHandleA(nullptr);
-    if (hExe) {
-        HookModuleIAT(hExe, "KERNEL32.dll", "GetCommandLineA", (void*)&hkGetCommandLineA, (void**)&pOriginalGetCommandLineA);
+    if (!hExe) return;
+
+    const BYTE sig[] = {
+        0x83, 0x3D, 0x00, 0x00, 0x00, 0x00, 0xFF,
+        0x7F, 0x00,
+        0xA0, 0x00, 0x00, 0x00, 0x00,
+        0xC7, 0x05, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x84, 0xC0,
+        0x74
+    };
+    const char mask[] = "xx????x?x????xx????xxxxxxx";
+
+    BYTE* match = FindPatternInModule(hExe, sig, mask);
+    if (match) {
+        g_pRetailFlag = *(BYTE**)(match + 10);
+        g_pWindowedFlag = *(DWORD**)(match + 16);
+
+        DWORD oldProtect;
+        if (g_pRetailFlag) {
+            VirtualProtect(g_pRetailFlag, 1, PAGE_EXECUTE_READWRITE, &oldProtect);
+            *g_pRetailFlag = 0;
+            VirtualProtect(g_pRetailFlag, 1, oldProtect, &oldProtect);
+        }
+        if (g_pWindowedFlag) {
+            VirtualProtect(g_pWindowedFlag, sizeof(DWORD), PAGE_EXECUTE_READWRITE, &oldProtect);
+            *g_pWindowedFlag = 1;
+            VirtualProtect(g_pWindowedFlag, sizeof(DWORD), oldProtect, &oldProtect);
+        }
+    }
+
+    HookModuleIAT(hExe, "KERNEL32.dll", "GetCommandLineA", (void*)&hkGetCommandLineA, (void**)&pOriginalGetCommandLineA);
+    HookModuleIAT(hExe, "USER32.dll", "SetWindowLongA", (void*)&hkSetWindowLongA, (void**)&pOriginalSetWindowLongA);
+    HookModuleIAT(hExe, "DDRAW.dll", "DirectDrawCreateEx", (void*)&hkDirectDrawCreateEx, (void**)&pOriginalDirectDrawCreateEx);
+
+    if (MH_Initialize() == MH_OK || MH_Initialize() == MH_ERROR_ALREADY_INITIALIZED) {
+        if (pOriginalDirectDrawCreateEx == nullptr) {
+            MH_CreateHookApi(L"ddraw.dll", "DirectDrawCreateEx", (void*)&hkDirectDrawCreateEx, (LPVOID*)&pOriginalDirectDrawCreateEx);
+        }
+        MH_EnableHook(MH_ALL_HOOKS);
     }
 }
 
 // ==============================================================================
-// Multi-Version Offset Table (1.01.1-b3 Non-Debug & 1.01.1-b3_debug)
+// Multi-Version Offset Table (Steam 1.01, 1.01.1-b3 Non-Debug, 1.01.1-b3_debug)
 // ==============================================================================
 struct GameOffsets {
     const char* versionLabel;
@@ -134,7 +696,7 @@ struct GameOffsets {
     DWORD spawnPeepMP;
     DWORD spawnPortable;
     DWORD getPlayerSector;
-    DWORD packCoords;
+    DWORD packCoords;        // 0 if packed inline via bitshift
     DWORD speciesTable;      // 0 if validated natively by SpawnPeep
     DWORD flagMpMode;
     DWORD playerPtr;
@@ -142,7 +704,25 @@ struct GameOffsets {
     DWORD buildFloatsList;
 };
 
-// Profile 0: Startopia 1.01.1-b3 (Non-Debug)
+// Profile 0: Startopia Steam 1.01 (TimeDateStamp: 0x3B727110)
+static const GameOffsets OFFSETS_STEAM_1_01 = {
+    "Steam/GOG 1.01 (0x3B727110)",
+    0x00000000, // deductEnergy (disabled)
+    0x000A0F60, // FUN_004a0f60
+    0x00104940, // FUN_00504940
+    0x00035100, // FUN_00435100
+    0x00035320, // FUN_00435320
+    0x00002C90, // FUN_00402c90
+    0x000D82F0, // FUN_004d82f0
+    0x00000000, // Packed inline via bitshift
+    0x00000000, // Validated natively inside SpawnPeep
+    0x005B5588, // DAT_009b5588
+    0x005B4CD4, // DAT_009b4cd4
+    0x003F7D18, // DAT_007f7d18
+    0x003F7D14  // DAT_007f7d14
+};
+
+// Profile 1: Startopia 1.01.1-b3 (Non-Debug)
 static const GameOffsets OFFSETS_1_01_1_B3 = {
     "1.01.1-b3 (Non-Debug)",
     0x00000000, // deductEnergy (disabled)
@@ -160,7 +740,7 @@ static const GameOffsets OFFSETS_1_01_1_B3 = {
     0x00676330  // DAT_00a76330
 };
 
-// Profile 1: Startopia 1.01.1-b3_debug
+// Profile 2: Startopia 1.01.1-b3_debug
 static const GameOffsets OFFSETS_1_01_1_B3_DEBUG = {
     "1.01.1-b3_debug",
     0x001AEA80, // FUN_005aea80
@@ -178,65 +758,10 @@ static const GameOffsets OFFSETS_1_01_1_B3_DEBUG = {
     0x00683880  // DAT_00a83880
 };
 
-GameOffsets g_offsets = OFFSETS_1_01_1_B3;
-
-DWORD   g_baseAddress = 0;
-FILE* g_logFile = nullptr;
-HWND    g_gameHwnd = nullptr;
-WNDPROC pOriginalGameWndProc = nullptr;
-HWND    g_menuHwnd = nullptr;
-HWND    g_tabHwnd = nullptr;
-HFONT   g_uiFont = nullptr;
-bool    g_menuVisible = true;
-bool    g_alwaysOnTop = true;
-bool    g_freeNewSegments = false;
+GameOffsets g_offsets = OFFSETS_STEAM_1_01;
 
 // ==============================================================================
-// Timestamped Dual Console + Immediate-Flush File Logger (mod_crash.log)
-// ==============================================================================
-struct ModConfig {
-    bool toggleConsole = false;
-    bool useImGUI = true;
-    int  hotkeyVK = VK_F12;
-    char hotkeyName[32] = "F12";
-    bool outputCrashLog = true;
-    bool showMenuOnStart = true;
-};
-
-ModConfig g_config;
-
-void LogMsg(const char* fmt, ...)
-{
-    if (!g_config.toggleConsole && (!g_config.outputCrashLog || g_logFile == nullptr)) {
-        return;
-    }
-
-    SYSTEMTIME st{};
-    GetLocalTime(&st);
-
-    char msgBuf[1024];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(msgBuf, sizeof(msgBuf), fmt, args);
-    va_end(args);
-
-    char finalBuf[1200];
-    snprintf(finalBuf, sizeof(finalBuf), "[%04d-%02d-%02d %02d:%02d:%02d.%03d] %s",
-        st.wYear, st.wMonth, st.wDay,
-        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
-        msgBuf);
-
-    if (g_config.toggleConsole) {
-        printf("%s", finalBuf);
-    }
-    if (g_config.outputCrashLog && g_logFile) {
-        fprintf(g_logFile, "%s", finalBuf);
-        fflush(g_logFile);
-    }
-}
-
-// ==============================================================================
-// Runtime Version Detector (Selects 1.01.1-b3 vs 1.01.1-b3_debug at Launch)
+// Runtime Version Detector (Selects Steam 1.01, 1.01.1-b3, or 1.01.1-b3_debug)
 // ==============================================================================
 bool CheckBytesAtRVA(DWORD rva, const BYTE* expected, size_t len)
 {
@@ -251,21 +776,30 @@ bool CheckBytesAtRVA(DWORD rva, const BYTE* expected, size_t len)
 
 void DetectGameVersion()
 {
-    // Both FUN_005aeec0 (1.01.1-b3_debug @ 0x001AEEC0) and FUN_005ab390 (1.01.1-b3 @ 0x001AB390)
-    // begin with the exact 3-byte SEH frame header: 6A FF 68 (push -1; push SEH_Handler)
-    const BYTE sigSehPrologue[] = { 0x6A, 0xFF, 0x68 };
+    DWORD timeStamp = 0;
+    __try {
+        auto* dos = (IMAGE_DOS_HEADER*)g_baseAddress;
+        auto* nt = (IMAGE_NT_HEADERS*)(g_baseAddress + dos->e_lfanew);
+        timeStamp = nt->FileHeader.TimeDateStamp;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        timeStamp = 0;
+    }
 
+    const BYTE sigSehPrologue[] = { 0x6A, 0xFF, 0x68 };
     bool isB3NonDebug = CheckBytesAtRVA(OFFSETS_1_01_1_B3.scriptAddEnergy, sigSehPrologue, sizeof(sigSehPrologue));
     bool isB3Debug = CheckBytesAtRVA(OFFSETS_1_01_1_B3_DEBUG.scriptAddEnergy, sigSehPrologue, sizeof(sigSehPrologue));
 
-    if (isB3NonDebug && !isB3Debug) {
+    if (timeStamp == 0x3B727110 || (!isB3NonDebug && !isB3Debug)) {
+        g_offsets = OFFSETS_STEAM_1_01;
+    }
+    else if (isB3NonDebug && !isB3Debug) {
         g_offsets = OFFSETS_1_01_1_B3;
     }
     else if (isB3Debug && !isB3NonDebug) {
         g_offsets = OFFSETS_1_01_1_B3_DEBUG;
     }
     else {
-        // Tie-breaker via PackCoords prologue (push ebp; mov ebp, esp -> 55 8B EC)
         const BYTE sigStdPrologue[] = { 0x55, 0x8B, 0xEC };
         if (CheckBytesAtRVA(OFFSETS_1_01_1_B3.packCoords, sigStdPrologue, sizeof(sigStdPrologue))) {
             g_offsets = OFFSETS_1_01_1_B3;
@@ -275,8 +809,8 @@ void DetectGameVersion()
         }
     }
 
-    LogMsg("[VERSION] Detected Startopia build: %s (AddEnergy=0x%08X, PlayerPtr=0x%08X)\n",
-        g_offsets.versionLabel, g_offsets.scriptAddEnergy, g_offsets.playerPtr);
+    LogMsg("[VERSION] Detected Startopia build: %s (TimeStamp=0x%08X, AddEnergy=0x%08X, PlayerPtr=0x%08X)\n",
+        g_offsets.versionLabel, timeStamp, g_offsets.scriptAddEnergy, g_offsets.playerPtr);
 }
 
 // ==============================================================================
@@ -349,7 +883,8 @@ void LoadOrCreateIniConfig()
                 "UseImGUI=true\n"
                 "Hotkey=F12\n"
                 "OutputCrashLog=true\n"
-                "ShowMenuOnStart=true\n");
+                "ShowMenuOnStart=true\n"
+                "ForceWindowed=true\n");
             fclose(f);
         }
     }
@@ -370,6 +905,9 @@ void LoadOrCreateIniConfig()
 
     GetPrivateProfileStringA("General", "ShowMenuOnStart", "true", buf, sizeof(buf), iniPath);
     g_config.showMenuOnStart = ParseIniBool(buf, true);
+
+    GetPrivateProfileStringA("General", "ForceWindowed", "true", buf, sizeof(buf), iniPath);
+    g_config.forceWindowed = ParseIniBool(buf, true);
 
     g_menuVisible = g_config.showMenuOnStart;
 }
@@ -630,15 +1168,15 @@ static const int PEEP_CATALOG_COUNT = sizeof(g_peepCatalog) / sizeof(g_peepCatal
 
 #pragma pack(push, 1)
 struct PeepAttributesFull {
-    unsigned int peepType;       // +0x00 (local_50): Peep species ID
-    unsigned short flags;        // +0x04 (local_4c): 0x0001 = Resident, 0x0000 = Visitor
-    unsigned char moodData[54];  // +0x06..+0x3B: Zero-initialized mood/preference array
-    unsigned int defaultFlag;    // +0x3C (local_14): 1 = use default mood weights
-    unsigned char skill;         // +0x40 (local_10): 0..5
-    unsigned char loyalty;       // +0x41 (local_f low): 0..5
-    unsigned char dedication;    // +0x42 (local_f high): 0..5
-    unsigned char infected;      // +0x43 (local_c): 0 = healthy
-    unsigned char reserved[4];   // +0x44..+0x47
+    unsigned int peepType;
+    unsigned short flags;
+    unsigned char moodData[54];
+    unsigned int defaultFlag;
+    unsigned char skill;
+    unsigned char loyalty;
+    unsigned char dedication;
+    unsigned char infected;
+    unsigned char reserved[4];
 };
 #pragma pack(pop)
 
@@ -700,7 +1238,7 @@ LONG WINAPI GlobalVectoredCrashHandler(PEXCEPTION_POINTERS ep)
 void ApplyMenuAlwaysOnTop(bool alwaysOnTop)
 {
     g_alwaysOnTop = alwaysOnTop;
-    if (g_menuHwnd != nullptr) {
+    if (g_menuHwnd != nullptr && g_menuVisible) {
         SetWindowPos(
             g_menuHwnd,
             g_alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
@@ -724,7 +1262,6 @@ typedef unsigned int(__fastcall* tSpawnPortable)(unsigned int* pPackedCoords, un
 unsigned int GetSafePlayerTile(void* pPlayer, int localOffsetX, int localZ, int deck)
 {
     auto GetSector = (tGetPlayerSector)(g_baseAddress + g_offsets.getPlayerSector);
-    auto PackCoords = (tPackCoords)(g_baseAddress + g_offsets.packCoords);
 
     unsigned int minX = *(unsigned int*)((BYTE*)pPlayer + 0x1785 + deck * 4);
     unsigned int maxX = *(unsigned int*)((BYTE*)pPlayer + 0x1791 + deck * 4);
@@ -736,7 +1273,16 @@ unsigned int GetSafePlayerTile(void* pPlayer, int localOffsetX, int localZ, int 
     }
 
     unsigned int packedCoord = 0;
-    PackCoords(&packedCoord, (char)finalX, (unsigned int)localZ, (unsigned int)deck);
+    if (g_offsets.packCoords != 0) {
+        auto PackCoords = (tPackCoords)(g_baseAddress + g_offsets.packCoords);
+        PackCoords(&packedCoord, (char)finalX, (unsigned int)localZ, (unsigned int)deck);
+    }
+    else {
+        // Inline bitfield format used by Steam 1.01:
+        // ((deck & 3) << 5 | (z & 0x1F)) << 8 | (finalX & 0xFF)
+        packedCoord = ((((unsigned int)deck & 3U) << 5 | ((unsigned int)localZ & 0x1FU)) << 8) |
+            ((unsigned int)finalX & 0xFFU);
+    }
     return packedCoord;
 }
 
@@ -1011,10 +1557,8 @@ bool MatchesBuildFilter(const BuildVarEntry& entry, int catFilter, const char* s
 }
 
 // ==============================================================================
-// Subclassed Game Main-Thread WndProc + Command Queue Timer
+// Command Queue Execution on Game Main Thread
 // ==============================================================================
-#define GAME_QUEUE_TIMER_ID 0x5A70
-
 void ProcessCommandQueueOnMainThread()
 {
     void* pPlayer = *(void**)(g_baseAddress + g_offsets.playerPtr);
@@ -1054,14 +1598,6 @@ void ProcessCommandQueueOnMainThread()
             break;
         }
     }
-}
-
-LRESULT CALLBACK SubclassGameWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
-{
-    if (uMsg == WM_TIMER && wParam == GAME_QUEUE_TIMER_ID) {
-        ProcessCommandQueueOnMainThread();
-    }
-    return CallWindowProcA(pOriginalGameWndProc, hwnd, uMsg, wParam, lParam);
 }
 
 HWND FindStartopiaMainWindow()
@@ -1516,8 +2052,8 @@ LRESULT CALLBACK ClassicMenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         // --- TAB 4: Help/About ---
         char helpBuf[768];
         sprintf_s(helpBuf,
-            "Startopia Cheeseburger Menu v1.0 (Classic Win32 UI)\n"
-            "Build Date: 11/19/2026 | Game: %s\n"
+            "Startopia Cheeseburger Menu v1.2.0 (Classic Win32 UI)\n"
+            "Build Date: 11/21/2026 | Game: %s\n"
             "Powered by Dear ImGui & MinHook\n"
             "Dedicated to Chris Nelson.\n\n"
             "• [%s] : Show / Hide this Menu Overlay\n"
@@ -1726,8 +2262,7 @@ LRESULT CALLBACK ClassicMenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     }
 
     case WM_CLOSE:
-        g_menuVisible = false;
-        ShowWindow(hwnd, SW_HIDE);
+        SetMenuVisibility(false);
         return 0;
     }
 
@@ -1752,8 +2287,8 @@ void CreateClassicMenuWindow(HMODULE hModule)
         nullptr, nullptr, hModule, nullptr
     );
 
-    ShowWindow(g_menuHwnd, g_menuVisible ? SW_SHOW : SW_HIDE);
-    UpdateWindow(g_menuHwnd);
+    SetMenuVisibility(g_menuVisible);
+    if (g_menuVisible) UpdateWindow(g_menuHwnd);
 }
 
 // ==============================================================================
@@ -1842,8 +2377,7 @@ LRESULT CALLBACK ImGuiOverlayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
         if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
         break;
     case WM_CLOSE:
-        g_menuVisible = false;
-        ShowWindow(hWnd, SW_HIDE);
+        SetMenuVisibility(false);
         return 0;
     }
     return DefWindowProcA(hWnd, msg, wParam, lParam);
@@ -1920,7 +2454,7 @@ void RenderImGuiMenuContents()
 
         // --- TAB 1: Peeps ---
         if (ImGui::BeginTabItem("Peeps")) {
-            static int peepIdx = 9; // Default: Salt Hog
+            static int peepIdx = 9;
             static int peepDeck = 0;
             static int peepX = 6;
             static int peepY = 6;
@@ -2026,7 +2560,7 @@ void RenderImGuiMenuContents()
 
         // --- TAB 2: Crates ---
         if (ImGui::BeginTabItem("Crates")) {
-            static int crateIdx = 5; // Default: Food Crate
+            static int crateIdx = 5;
             static int crateSubIdx = 0;
             static int crateDeck = 0;
             static int crateX = 8;
@@ -2256,8 +2790,8 @@ void RenderImGuiMenuContents()
         // --- TAB 4: Help/About ---
         if (ImGui::BeginTabItem("Help/About")) {
             ImGui::Spacing();
-            ImGui::TextUnformatted("Startopia Cheeseburger Menu v1.0 (Dear ImGui DX11 Overlay)");
-            ImGui::TextDisabled("Build Date: 11/19/2026  |  Game: %s", g_offsets.versionLabel);
+            ImGui::TextUnformatted("Startopia Cheeseburger Menu v1.2.0 (Dear ImGui DX11 Overlay)");
+            ImGui::TextDisabled("Build Date: 11/21/2026  |  Game: %s", g_offsets.versionLabel);
             ImGui::TextDisabled("Powered by Dear ImGui & MinHook  |  Dedicated to Chris Nelson.");
             ImGui::Separator();
             ImGui::Spacing();
@@ -2309,16 +2843,15 @@ void RunImGuiWindowLoop(HMODULE hModule)
                 DispatchMessageA(&msg);
             }
             if (GetAsyncKeyState(g_config.hotkeyVK) & 1) {
-                g_menuVisible = !g_menuVisible;
-                ShowWindow(g_menuHwnd, g_menuVisible ? SW_SHOW : SW_HIDE);
+                SetMenuVisibility(!g_menuVisible);
             }
             Sleep(20);
         }
         return;
     }
 
-    ShowWindow(g_menuHwnd, g_menuVisible ? SW_SHOW : SW_HIDE);
-    UpdateWindow(g_menuHwnd);
+    SetMenuVisibility(g_menuVisible);
+    if (g_menuVisible) UpdateWindow(g_menuHwnd);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -2339,8 +2872,7 @@ void RunImGuiWindowLoop(HMODULE hModule)
         }
 
         if (GetAsyncKeyState(g_config.hotkeyVK) & 1) {
-            g_menuVisible = !g_menuVisible;
-            ShowWindow(g_menuHwnd, g_menuVisible ? SW_SHOW : SW_HIDE);
+            SetMenuVisibility(!g_menuVisible);
         }
 
         if (g_menuVisible && g_pd3dDevice != nullptr) {
@@ -2371,8 +2903,6 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
     HMODULE hModule = (HMODULE)lpReserved;
     Sleep(2500);
 
-    LoadOrCreateIniConfig();
-
     if (g_config.toggleConsole) {
         AllocConsole();
         FILE* f = nullptr;
@@ -2389,12 +2919,13 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
     LogMsg("Startopia Base Address: 0x%08X\n", g_baseAddress);
     DetectGameVersion();
 
-    LogMsg("Loaded INI: ToggleConsole=%d | UseImGUI=%d | Hotkey=%s (0x%02X) | OutputCrashLog=%d | ShowMenuOnStart=%d\n",
+    LogMsg("Loaded INI: ToggleConsole=%d | UseImGUI=%d | Hotkey=%s (0x%02X) | OutputCrashLog=%d | ShowMenuOnStart=%d | ForceWindowed=%d\n",
         g_config.toggleConsole ? 1 : 0,
         g_config.useImGUI ? 1 : 0,
         g_config.hotkeyName, g_config.hotkeyVK,
         g_config.outputCrashLog ? 1 : 0,
-        g_config.showMenuOnStart ? 1 : 0);
+        g_config.showMenuOnStart ? 1 : 0,
+        g_config.forceWindowed ? 1 : 0);
 
     if (g_offsets.deductEnergy != 0 &&
         (MH_Initialize() == MH_OK || MH_Initialize() == MH_ERROR_ALREADY_INITIALIZED)) {
@@ -2408,14 +2939,18 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
         }
     }
 
-    for (int attempt = 0; attempt < 20 && g_gameHwnd == nullptr; attempt++) {
-        g_gameHwnd = FindStartopiaMainWindow();
-        if (g_gameHwnd == nullptr) Sleep(250);
+    if (g_gameHwnd == nullptr) {
+        for (int attempt = 0; attempt < 20 && g_gameHwnd == nullptr; attempt++) {
+            g_gameHwnd = FindStartopiaMainWindow();
+            if (g_gameHwnd == nullptr) Sleep(250);
+        }
     }
 
     if (g_gameHwnd != nullptr) {
-        pOriginalGameWndProc = (WNDPROC)SetWindowLongA(g_gameHwnd, GWL_WNDPROC, (LONG)SubclassGameWndProc);
-        SetTimer(g_gameHwnd, GAME_QUEUE_TIMER_ID, 100, nullptr);
+        if (pOriginalGameWndProc == nullptr) {
+            pOriginalGameWndProc = (WNDPROC)SetWindowLongA(g_gameHwnd, GWL_WNDPROC, (LONG)SubclassGameWndProc);
+            SetTimer(g_gameHwnd, GAME_QUEUE_TIMER_ID, 100, nullptr);
+        }
         LogMsg("Attached paced command queue (100ms) to HWND: 0x%p\n", g_gameHwnd);
     }
     else {
@@ -2437,8 +2972,7 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
             }
 
             if (GetAsyncKeyState(g_config.hotkeyVK) & 1) {
-                g_menuVisible = !g_menuVisible;
-                ShowWindow(g_menuHwnd, g_menuVisible ? SW_SHOW : SW_HIDE);
+                SetMenuVisibility(!g_menuVisible);
             }
 
             Sleep(20);
@@ -2452,7 +2986,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        InstallAutoWindowedArgHook();
+        LoadOrCreateIniConfig();
+        if (g_config.forceWindowed) {
+            InstallWindowedModeEnforcer();
+        }
         CreateThread(nullptr, 0, MainThread, hModule, 0, nullptr);
     }
     return TRUE;
