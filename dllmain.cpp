@@ -173,7 +173,7 @@ LRESULT CALLBACK SubclassGameWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 }
 
 // ==============================================================================
-// Self-Contained DirectDraw7 Windowed Mode + Flip->Blt Emulation (1.00 / 1.01 / b3)
+// Self-Contained DirectDraw7 Windowed Mode + Flip->Blt Emulation (All Builds)
 // ==============================================================================
 BYTE* g_pRetailFlag = nullptr;
 DWORD* g_pWindowedFlag = nullptr;
@@ -309,7 +309,6 @@ LPSTR WINAPI hkGetCommandLineA()
     return g_patchedCmdLine;
 }
 
-// Convert screen-space rect to 0-based backbuffer client rect ONLY if it actually exceeds client bounds
 RECT NormalizeDestRectForBackBuffer(const RECT& rawRect)
 {
     RECT out = rawRect;
@@ -686,7 +685,7 @@ void InstallWindowedModeEnforcer()
 }
 
 // ==============================================================================
-// Multi-Version Offset Table (1.01.1-b3 Non-Debug & 1.01.1-b3_debug)
+// Multi-Version Offset Table (Steam 1.01, 1.01.1-b3 Non-Debug, 1.01.1-b3_debug)
 // ==============================================================================
 struct GameOffsets {
     const char* versionLabel;
@@ -697,52 +696,72 @@ struct GameOffsets {
     DWORD spawnPeepMP;
     DWORD spawnPortable;
     DWORD getPlayerSector;
-    DWORD packCoords;
-    DWORD speciesTable;
+    DWORD packCoords;        // 0 if packed inline via bitshift
+    DWORD speciesTable;      // 0 if validated natively by SpawnPeep
     DWORD flagMpMode;
     DWORD playerPtr;
     DWORD buildSlongsList;
     DWORD buildFloatsList;
 };
 
+// Profile 0: Startopia Steam 1.01 (TimeDateStamp: 0x3B727110)
+static const GameOffsets OFFSETS_STEAM_1_01 = {
+    "Steam 1.01 (0x3B727110)",
+    0x00000000, // deductEnergy (disabled)
+    0x000A0F60, // FUN_004a0f60
+    0x00104940, // FUN_00504940
+    0x00035100, // FUN_00435100
+    0x00035320, // FUN_00435320
+    0x00002C90, // FUN_00402c90
+    0x000D82F0, // FUN_004d82f0
+    0x00000000, // Packed inline via bitshift
+    0x00000000, // Validated natively inside SpawnPeep
+    0x005B5588, // DAT_009b5588
+    0x005B4CD4, // DAT_009b4cd4
+    0x003F7D18, // DAT_007f7d18
+    0x003F7D14  // DAT_007f7d14
+};
+
+// Profile 1: Startopia 1.01.1-b3 (Non-Debug)
 static const GameOffsets OFFSETS_1_01_1_B3 = {
     "1.01.1-b3 (Non-Debug)",
-    0x00000000,
-    0x001AB390,
-    0x0029AEA0,
-    0x00229B80,
-    0x00229CA0,
-    0x0018B9B0,
-    0x00237F10,
-    0x0005EE30,
-    0x00000000,
-    0x007F0C4C,
-    0x007E7C2C,
-    0x0067632C,
-    0x00676330
+    0x00000000, // deductEnergy (disabled)
+    0x001AB390, // FUN_005ab390
+    0x0029AEA0, // FUN_0069aea0
+    0x00229B80, // FUN_00629b80
+    0x00229CA0, // FUN_00629ca0
+    0x0018B9B0, // FUN_0058b9b0
+    0x00237F10, // FUN_00637f10
+    0x0005EE30, // FUN_0045ee30
+    0x00000000, // Validated natively inside FUN_0062a2e0
+    0x007F0C4C, // DAT_00bf0c4c
+    0x007E7C2C, // DAT_00be7c2c
+    0x0067632C, // DAT_00a7632c
+    0x00676330  // DAT_00a76330
 };
 
+// Profile 2: Startopia 1.01.1-b3_debug
 static const GameOffsets OFFSETS_1_01_1_B3_DEBUG = {
     "1.01.1-b3_debug",
-    0x001AEA80,
-    0x001AEEC0,
-    0x002A0430,
-    0x0022E2B0,
-    0x0022E3D0,
-    0x0018F9D0,
-    0x0023C680,
-    0x00061280,
-    0x004D9AF8,
-    0x007FE1AC,
-    0x007F5170,
-    0x0068387C,
-    0x00683880
+    0x001AEA80, // FUN_005aea80
+    0x001AEEC0, // FUN_005aeec0
+    0x002A0430, // FUN_006a0430
+    0x0022E2B0, // FUN_0062e2b0
+    0x0022E3D0, // FUN_0062e3d0
+    0x0018F9D0, // FUN_0058f9d0
+    0x0023C680, // FUN_0063c680
+    0x00061280, // FUN_00461280
+    0x004D9AF8, // DAT_008d9af8
+    0x007FE1AC, // DAT_00bfe1ac
+    0x007F5170, // DAT_00bf5170
+    0x0068387C, // DAT_00a8387c
+    0x00683880  // DAT_00a83880
 };
 
-GameOffsets g_offsets = OFFSETS_1_01_1_B3;
+GameOffsets g_offsets = OFFSETS_STEAM_1_01;
 
 // ==============================================================================
-// Runtime Version Detector (Selects 1.01.1-b3 vs 1.01.1-b3_debug at Launch)
+// Runtime Version Detector (Selects Steam 1.01, 1.01.1-b3, or 1.01.1-b3_debug)
 // ==============================================================================
 bool CheckBytesAtRVA(DWORD rva, const BYTE* expected, size_t len)
 {
@@ -757,12 +776,24 @@ bool CheckBytesAtRVA(DWORD rva, const BYTE* expected, size_t len)
 
 void DetectGameVersion()
 {
-    const BYTE sigSehPrologue[] = { 0x6A, 0xFF, 0x68 };
+    DWORD timeStamp = 0;
+    __try {
+        auto* dos = (IMAGE_DOS_HEADER*)g_baseAddress;
+        auto* nt = (IMAGE_NT_HEADERS*)(g_baseAddress + dos->e_lfanew);
+        timeStamp = nt->FileHeader.TimeDateStamp;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        timeStamp = 0;
+    }
 
+    const BYTE sigSehPrologue[] = { 0x6A, 0xFF, 0x68 };
     bool isB3NonDebug = CheckBytesAtRVA(OFFSETS_1_01_1_B3.scriptAddEnergy, sigSehPrologue, sizeof(sigSehPrologue));
     bool isB3Debug = CheckBytesAtRVA(OFFSETS_1_01_1_B3_DEBUG.scriptAddEnergy, sigSehPrologue, sizeof(sigSehPrologue));
 
-    if (isB3NonDebug && !isB3Debug) {
+    if (timeStamp == 0x3B727110 || (!isB3NonDebug && !isB3Debug)) {
+        g_offsets = OFFSETS_STEAM_1_01;
+    }
+    else if (isB3NonDebug && !isB3Debug) {
         g_offsets = OFFSETS_1_01_1_B3;
     }
     else if (isB3Debug && !isB3NonDebug) {
@@ -778,8 +809,8 @@ void DetectGameVersion()
         }
     }
 
-    LogMsg("[VERSION] Detected Startopia build: %s (AddEnergy=0x%08X, PlayerPtr=0x%08X)\n",
-        g_offsets.versionLabel, g_offsets.scriptAddEnergy, g_offsets.playerPtr);
+    LogMsg("[VERSION] Detected Startopia build: %s (TimeStamp=0x%08X, AddEnergy=0x%08X, PlayerPtr=0x%08X)\n",
+        g_offsets.versionLabel, timeStamp, g_offsets.scriptAddEnergy, g_offsets.playerPtr);
 }
 
 // ==============================================================================
@@ -1231,7 +1262,6 @@ typedef unsigned int(__fastcall* tSpawnPortable)(unsigned int* pPackedCoords, un
 unsigned int GetSafePlayerTile(void* pPlayer, int localOffsetX, int localZ, int deck)
 {
     auto GetSector = (tGetPlayerSector)(g_baseAddress + g_offsets.getPlayerSector);
-    auto PackCoords = (tPackCoords)(g_baseAddress + g_offsets.packCoords);
 
     unsigned int minX = *(unsigned int*)((BYTE*)pPlayer + 0x1785 + deck * 4);
     unsigned int maxX = *(unsigned int*)((BYTE*)pPlayer + 0x1791 + deck * 4);
@@ -1243,7 +1273,16 @@ unsigned int GetSafePlayerTile(void* pPlayer, int localOffsetX, int localZ, int 
     }
 
     unsigned int packedCoord = 0;
-    PackCoords(&packedCoord, (char)finalX, (unsigned int)localZ, (unsigned int)deck);
+    if (g_offsets.packCoords != 0) {
+        auto PackCoords = (tPackCoords)(g_baseAddress + g_offsets.packCoords);
+        PackCoords(&packedCoord, (char)finalX, (unsigned int)localZ, (unsigned int)deck);
+    }
+    else {
+        // Inline bitfield format used by Steam 1.01:
+        // ((deck & 3) << 5 | (z & 0x1F)) << 8 | (finalX & 0xFF)
+        packedCoord = ((((unsigned int)deck & 3U) << 5 | ((unsigned int)localZ & 0x1FU)) << 8) |
+            ((unsigned int)finalX & 0xFFU);
+    }
     return packedCoord;
 }
 
@@ -2014,7 +2053,7 @@ LRESULT CALLBACK ClassicMenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         char helpBuf[768];
         sprintf_s(helpBuf,
             "Startopia Cheeseburger Menu v1.0 (Classic Win32 UI)\n"
-            "Build Date: 11/20/2026 | Game: %s\n"
+            "Build Date: 11/21/2026 | Game: %s\n"
             "Powered by Dear ImGui & MinHook\n"
             "Dedicated to Chris Nelson.\n\n"
             "• [%s] : Show / Hide this Menu Overlay\n"
@@ -2752,7 +2791,7 @@ void RenderImGuiMenuContents()
         if (ImGui::BeginTabItem("Help/About")) {
             ImGui::Spacing();
             ImGui::TextUnformatted("Startopia Cheeseburger Menu v1.0 (Dear ImGui DX11 Overlay)");
-            ImGui::TextDisabled("Build Date: 11/20/2026  |  Game: %s", g_offsets.versionLabel);
+            ImGui::TextDisabled("Build Date: 11/21/2026  |  Game: %s", g_offsets.versionLabel);
             ImGui::TextDisabled("Powered by Dear ImGui & MinHook  |  Dedicated to Chris Nelson.");
             ImGui::Separator();
             ImGui::Spacing();
