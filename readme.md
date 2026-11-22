@@ -3,21 +3,30 @@
 **Current Version:** 1.2.0\
 **Build Date:** 11/21/2026
 
-An in-game cheat and sandbox manipulation overlay for **Startopia**. Rather than relying on static mission text scripts (`mishXX.txt`), this mod uses a `version.dll` proxy and **MinHook** to execute internal engine functions directly on the main game thread via a **Dear ImGui** overlay (with a Classic Win32 GDI fallback).
+**IMPORTANT:** You MUST rename the original `binkw32.dll` to `binkw32_orig.dll` in order for this menu to forward commands to the original bink DLL.
+
+An in-game cheat and sandbox manipulation overlay for **Startopia**. Rather than relying on static mission text scripts (`mishXX.txt`), this mod uses a `binkw32.dll` proxy and **MinHook** to execute internal engine functions directly on the main game thread via a **Dear ImGui** overlay (with a Classic Win32 GDI fallback).
 
 The menu is designed as external, ImGui does not have native support for DirectX7, you will need to run the beta builds with /r or use DXWnd with the stable release to force windowed mode. You can force Borderless with third-party tools. Currently seeking reliable alternatives.
 
 ## Supported Versions (Crossed out means still in development)
 
-~~1.0.0 (CD/SafeDisc)~~\
-~~1.0.1 (CD/SafeDisc)~~\
-~~1.0.1b (CD/SafeDisc)~~\
+~~1.0.0 (CD/SafeDisc) (No-CD)~~\
+~~1.0.1 (CD/SafeDisc) (No-CD)~~\
+~~1.0.1b (CD/SafeDisc) (No-CD)~~\
 1.01 (Steam/GOG)\
 1.01.1-b3 (beta)\
 1.01.1-b3 (beta_debug)
 
-version.dll should now force any version of the game to run in a borderless window.\
-If you experience issues running the game in borderless, delete CardID.tom and Startopia.ini from game directory and try again.
+## Compatibility
+
+binkw32.dll should now force any version of the game to run in a borderless window.\
+If you experience issues running the game in borderless, delete CardID.tom and\
+Startopia.ini from game directory and try again.
+
+DLL should work on Windows Vista (SP1) and up.\
+If having issues with ImGUI, disable it in the\
+StartopiaCheeseburger.ini file.
 
 ## Dedicated to Chris Nelson
 
@@ -57,7 +66,8 @@ The name **"Cheeseburger Menu"** is a direct nod to the famous debug/cheat menu 
 
 1. **Game Version:** Requires the latest Steam beta build of Startopia (`1.01.1-b3`).
 2. **Display Mode:** Run the game in **Windowed** mode (or use a third-party borderless window utility). Exclusive full-screen mode is not supported.
-3. **Install:** Place the compiled `version.dll` into your main Startopia installation folder (next to `startopia.exe`).
+3. **Install:** Place the compiled `binkw32.dll` into your main Startopia installation folder (next to `startopia.exe`).
+   **IMPORTANT:** You MUST rename the original `binkw32.dll` to `binkw32_orig.dll` in order for this menu to forward commands to the original bink DLL.
 4. **Launch:** Start the game. `StartopiaCheeseburger.ini` will be generated automatically on first run. Press **F12** (or your configured hotkey) at any time to toggle the menu.
 
 ## Known Bugs
