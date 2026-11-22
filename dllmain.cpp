@@ -780,9 +780,9 @@ static const GameOffsets OFFSETS_RETAIL_1_00 = {
     0x003EB454  // DAT_007eb454
 };
 
-// Profile 1: Startopia Retail 1.01 & Steam 1.01 (TimeDateStamp: 0x3B727110)
+// Profile 1: Startopia 1.01/1.01b (Retail/Steam/GOG) (TimeDateStamp: 0x3B727110)
 static const GameOffsets OFFSETS_STEAM_1_01 = {
-    "Retail / Steam 1.01",
+    "1.01 / 1.01b (Retail/Steam/GOG)",
     0x00000000, // deductEnergy (disabled)
     0x000A0F60, // FUN_004a0f60
     0x00104940, // FUN_00504940
@@ -800,7 +800,7 @@ static const GameOffsets OFFSETS_STEAM_1_01 = {
 
 // Profile 2: Startopia 1.01.1-b3 (Non-Debug)
 static const GameOffsets OFFSETS_1_01_1_B3 = {
-    "1.01.1-b3 (Non-Debug)",
+    "1.01.1-b3",
     0x00000000, // deductEnergy (disabled)
     0x001AB390, // FUN_005ab390
     0x0029AEA0, // FUN_0069aea0
@@ -832,6 +832,21 @@ static const GameOffsets OFFSETS_1_01_1_B3_DEBUG = {
     0x007F5170, // DAT_00bf5170
     0x0068387C, // DAT_00a8387c
     0x00683880  // DAT_00a83880
+};
+
+// Profile 4: 1.02 Experimental Patch (startopia.exe_5.c)
+static const GameOffsets OFFSETS_1_02_EXP = {
+    "1.02 Experimental",
+    0x00676100, // playerPtr        (DAT_00a76100)
+    0x00676FA4, // flagMpMode       (DAT_00a76fa4)
+    0x0048C540, // buildSlongsList  (PTR_FUN_0088c540)
+    0x0048C588, // buildFloatsList  (PTR_FUN_0088c588)
+    0x00104A00, // scriptAddEnergy  (FUN_00504a00)
+    0x001A5850, // discoverTech     (FUN_005a5850)
+    0x0003EDF0, // spawnPeepSP      (FUN_0043edf0)
+    0x0003EC20, // spawnPeepMP      (FUN_0043ec20)
+    0x00006960, // spawnPortable    (FUN_00406960)
+    0x000FB130  // getPlayerSector  (FUN_004fb130)
 };
 
 GameOffsets g_offsets = OFFSETS_STEAM_1_01;

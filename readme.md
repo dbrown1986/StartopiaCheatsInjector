@@ -11,10 +11,11 @@ The menu is designed as external, ImGui does not have native support for DirectX
 
 ## Supported Versions (Crossed out means still in development)
 
-~~1.0.0 (CD/SafeDisc) (No-CD)~~\
-~~1.0.1 (CD/SafeDisc) (No-CD)~~\
-~~1.0.1b (CD/SafeDisc) (No-CD)~~\
+1.0.0 (CD/SafeDisc) (No-CD)\
+1.0.1 (CD/SafeDisc) (No-CD)\
+1.0.1b (CD/SafeDisc) (No-CD)\
 1.01 (Steam/GOG)\
+1.02 Experimental
 1.01.1-b3 (beta)\
 1.01.1-b3 (beta_debug)
 
