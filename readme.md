@@ -1,5 +1,7 @@
 # Startopia Cheeseburger Menu
 
+<img width="1366" height="768" alt="startopia_foIAUA9iwW" src="https://github.com/user-attachments/assets/c7d40634-8136-4a9d-a2ac-93ba979c40b5" />
+
 **Current Version:** 1.4.0\
 **Build Date:** 11/22/2026
 
