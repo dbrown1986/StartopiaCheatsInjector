@@ -1,7 +1,7 @@
 # Startopia Cheeseburger Menu
 
-**Current Version:** 1.2.0\
-**Build Date:** 11/21/2026
+**Current Version:** 1.4.0\
+**Build Date:** 11/22/2026
 
 **IMPORTANT:** You MUST rename the original `binkw32.dll` to `binkw32_orig.dll` in order for this menu to forward commands to the original bink DLL.
 
