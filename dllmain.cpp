@@ -28,25 +28,83 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // ==============================================================================
-// version.dll Proxy Exports (Keeps the host game stable)
+// binkw32.dll Proxy Exports (Forwards all Bink APIs to local binkw32_orig.dll)
 // ==============================================================================
-#pragma comment(linker, "/EXPORT:GetFileVersionInfoA=C:\\Windows\\System32\\version.GetFileVersionInfoA")
-#pragma comment(linker, "/EXPORT:GetFileVersionInfoByHandle=C:\\Windows\\System32\\version.GetFileVersionInfoByHandle")
-#pragma comment(linker, "/EXPORT:GetFileVersionInfoExA=C:\\Windows\\System32\\version.GetFileVersionInfoExA")
-#pragma comment(linker, "/EXPORT:GetFileVersionInfoExW=C:\\Windows\\System32\\version.GetFileVersionInfoExW")
-#pragma comment(linker, "/EXPORT:GetFileVersionInfoSizeA=C:\\Windows\\System32\\version.GetFileVersionInfoSizeA")
-#pragma comment(linker, "/EXPORT:GetFileVersionInfoSizeExA=C:\\Windows\\System32\\version.GetFileVersionInfoSizeExA")
-#pragma comment(linker, "/EXPORT:GetFileVersionInfoSizeExW=C:\\Windows\\System32\\version.GetFileVersionInfoSizeExW")
-#pragma comment(linker, "/EXPORT:GetFileVersionInfoSizeW=C:\\Windows\\System32\\version.GetFileVersionInfoSizeW")
-#pragma comment(linker, "/EXPORT:GetFileVersionInfoW=C:\\Windows\\System32\\version.GetFileVersionInfoW")
-#pragma comment(linker, "/EXPORT:VerFindFileA=C:\\Windows\\System32\\version.VerFindFileA")
-#pragma comment(linker, "/EXPORT:VerFindFileW=C:\\Windows\\System32\\version.VerFindFileW")
-#pragma comment(linker, "/EXPORT:VerInstallFileA=C:\\Windows\\System32\\version.VerInstallFileA")
-#pragma comment(linker, "/EXPORT:VerInstallFileW=C:\\Windows\\System32\\version.VerInstallFileW")
-#pragma comment(linker, "/EXPORT:VerLanguageNameA=C:\\Windows\\System32\\version.VerLanguageNameA")
-#pragma comment(linker, "/EXPORT:VerLanguageNameW=C:\\Windows\\System32\\version.VerLanguageNameW")
-#pragma comment(linker, "/EXPORT:VerQueryValueA=C:\\Windows\\System32\\version.VerQueryValueA")
-#pragma comment(linker, "/EXPORT:VerQueryValueW=C:\\Windows\\System32\\version.VerQueryValueW")
+#pragma comment(linker, "/EXPORT:_BinkBufferBlit@12=binkw32_orig._BinkBufferBlit@12")
+#pragma comment(linker, "/EXPORT:_BinkBufferCheckWinPos@12=binkw32_orig._BinkBufferCheckWinPos@12")
+#pragma comment(linker, "/EXPORT:_BinkBufferClear@8=binkw32_orig._BinkBufferClear@8")
+#pragma comment(linker, "/EXPORT:_BinkBufferClose@4=binkw32_orig._BinkBufferClose@4")
+#pragma comment(linker, "/EXPORT:_BinkBufferGetDescription@4=binkw32_orig._BinkBufferGetDescription@4")
+#pragma comment(linker, "/EXPORT:_BinkBufferGetError@0=binkw32_orig._BinkBufferGetError@0")
+#pragma comment(linker, "/EXPORT:_BinkBufferLock@4=binkw32_orig._BinkBufferLock@4")
+#pragma comment(linker, "/EXPORT:_BinkBufferOpen@16=binkw32_orig._BinkBufferOpen@16")
+#pragma comment(linker, "/EXPORT:_BinkBufferSetDirectDraw@8=binkw32_orig._BinkBufferSetDirectDraw@8")
+#pragma comment(linker, "/EXPORT:_BinkBufferSetHWND@8=binkw32_orig._BinkBufferSetHWND@8")
+#pragma comment(linker, "/EXPORT:_BinkBufferSetOffset@12=binkw32_orig._BinkBufferSetOffset@12")
+#pragma comment(linker, "/EXPORT:_BinkBufferSetResolution@12=binkw32_orig._BinkBufferSetResolution@12")
+#pragma comment(linker, "/EXPORT:_BinkBufferSetScale@12=binkw32_orig._BinkBufferSetScale@12")
+#pragma comment(linker, "/EXPORT:_BinkBufferUnlock@4=binkw32_orig._BinkBufferUnlock@4")
+#pragma comment(linker, "/EXPORT:_BinkCheckCursor@20=binkw32_orig._BinkCheckCursor@20")
+#pragma comment(linker, "/EXPORT:_BinkClose@4=binkw32_orig._BinkClose@4")
+#pragma comment(linker, "/EXPORT:_BinkCloseTrack@4=binkw32_orig._BinkCloseTrack@4")
+#pragma comment(linker, "/EXPORT:_BinkControlBackgroundIO@8=binkw32_orig._BinkControlBackgroundIO@8")
+#pragma comment(linker, "/EXPORT:_BinkControlPlatformFeatures@8=binkw32_orig._BinkControlPlatformFeatures@8")
+#pragma comment(linker, "/EXPORT:_BinkCopyToBuffer@28=binkw32_orig._BinkCopyToBuffer@28")
+#pragma comment(linker, "/EXPORT:_BinkCopyToBufferRect@44=binkw32_orig._BinkCopyToBufferRect@44")
+#pragma comment(linker, "/EXPORT:_BinkDDSurfaceType@4=binkw32_orig._BinkDDSurfaceType@4")
+#pragma comment(linker, "/EXPORT:_BinkDX8SurfaceType@4=binkw32_orig._BinkDX8SurfaceType@4")
+#pragma comment(linker, "/EXPORT:_BinkDX9SurfaceType@4=binkw32_orig._BinkDX9SurfaceType@4")
+#pragma comment(linker, "/EXPORT:_BinkDoFrame@4=binkw32_orig._BinkDoFrame@4")
+#pragma comment(linker, "/EXPORT:_BinkDoFrameAsync@12=binkw32_orig._BinkDoFrameAsync@12")
+#pragma comment(linker, "/EXPORT:_BinkDoFrameAsyncMulti@12=binkw32_orig._BinkDoFrameAsyncMulti@12")
+#pragma comment(linker, "/EXPORT:_BinkDoFrameAsyncWait@8=binkw32_orig._BinkDoFrameAsyncWait@8")
+#pragma comment(linker, "/EXPORT:_BinkDoFramePlane@8=binkw32_orig._BinkDoFramePlane@8")
+#pragma comment(linker, "/EXPORT:_BinkFreeGlobals@0=binkw32_orig._BinkFreeGlobals@0")
+#pragma comment(linker, "/EXPORT:_BinkGetError@0=binkw32_orig._BinkGetError@0")
+#pragma comment(linker, "/EXPORT:_BinkGetFrameBuffersInfo@8=binkw32_orig._BinkGetFrameBuffersInfo@8")
+#pragma comment(linker, "/EXPORT:_BinkGetKeyFrame@12=binkw32_orig._BinkGetKeyFrame@12")
+#pragma comment(linker, "/EXPORT:_BinkGetPalette@4=binkw32_orig._BinkGetPalette@4")
+#pragma comment(linker, "/EXPORT:_BinkGetRealtime@12=binkw32_orig._BinkGetRealtime@12")
+#pragma comment(linker, "/EXPORT:_BinkGetRects@8=binkw32_orig._BinkGetRects@8")
+#pragma comment(linker, "/EXPORT:_BinkGetSummary@8=binkw32_orig._BinkGetSummary@8")
+#pragma comment(linker, "/EXPORT:_BinkGetTrackData@8=binkw32_orig._BinkGetTrackData@8")
+#pragma comment(linker, "/EXPORT:_BinkGetTrackID@8=binkw32_orig._BinkGetTrackID@8")
+#pragma comment(linker, "/EXPORT:_BinkGetTrackMaxSize@8=binkw32_orig._BinkGetTrackMaxSize@8")
+#pragma comment(linker, "/EXPORT:_BinkGetTrackType@8=binkw32_orig._BinkGetTrackType@8")
+#pragma comment(linker, "/EXPORT:_BinkGoto@12=binkw32_orig._BinkGoto@12")
+#pragma comment(linker, "/EXPORT:_BinkIsSoftwareCursor@8=binkw32_orig._BinkIsSoftwareCursor@8")
+#pragma comment(linker, "/EXPORT:_BinkLogoAddress@0=binkw32_orig._BinkLogoAddress@0")
+#pragma comment(linker, "/EXPORT:_BinkNextFrame@4=binkw32_orig._BinkNextFrame@4")
+#pragma comment(linker, "/EXPORT:_BinkOpen@8=binkw32_orig._BinkOpen@8")
+#pragma comment(linker, "/EXPORT:_BinkOpenDirectSound@4=binkw32_orig._BinkOpenDirectSound@4")
+#pragma comment(linker, "/EXPORT:_BinkOpenMiles@4=binkw32_orig._BinkOpenMiles@4")
+#pragma comment(linker, "/EXPORT:_BinkOpenTrack@8=binkw32_orig._BinkOpenTrack@8")
+#pragma comment(linker, "/EXPORT:_BinkOpenWaveOut@4=binkw32_orig._BinkOpenWaveOut@4")
+#pragma comment(linker, "/EXPORT:_BinkPause@8=binkw32_orig._BinkPause@8")
+#pragma comment(linker, "/EXPORT:_BinkRegisterFrameBuffers@8=binkw32_orig._BinkRegisterFrameBuffers@8")
+#pragma comment(linker, "/EXPORT:_BinkRequestStopAsyncThread@4=binkw32_orig._BinkRequestStopAsyncThread@4")
+#pragma comment(linker, "/EXPORT:_BinkRestoreCursor@4=binkw32_orig._BinkRestoreCursor@4")
+#pragma comment(linker, "/EXPORT:_BinkService@4=binkw32_orig._BinkService@4")
+#pragma comment(linker, "/EXPORT:_BinkSetError@4=binkw32_orig._BinkSetError@4")
+#pragma comment(linker, "/EXPORT:_BinkSetFrameRate@8=binkw32_orig._BinkSetFrameRate@8")
+#pragma comment(linker, "/EXPORT:_BinkSetIO@4=binkw32_orig._BinkSetIO@4")
+#pragma comment(linker, "/EXPORT:_BinkSetIOSize@4=binkw32_orig._BinkSetIOSize@4")
+#pragma comment(linker, "/EXPORT:_BinkSetMemory@8=binkw32_orig._BinkSetMemory@8")
+#pragma comment(linker, "/EXPORT:_BinkSetMixBinVolumes@20=binkw32_orig._BinkSetMixBinVolumes@20")
+#pragma comment(linker, "/EXPORT:_BinkSetMixBins@16=binkw32_orig._BinkSetMixBins@16")
+#pragma comment(linker, "/EXPORT:_BinkSetPan@12=binkw32_orig._BinkSetPan@12")
+#pragma comment(linker, "/EXPORT:_BinkSetSimulate@4=binkw32_orig._BinkSetSimulate@4")
+#pragma comment(linker, "/EXPORT:_BinkSetSoundOnOff@8=binkw32_orig._BinkSetSoundOnOff@8")
+#pragma comment(linker, "/EXPORT:_BinkSetSoundSystem@8=binkw32_orig._BinkSetSoundSystem@8")
+#pragma comment(linker, "/EXPORT:_BinkSetSoundTrack@8=binkw32_orig._BinkSetSoundTrack@8")
+#pragma comment(linker, "/EXPORT:_BinkSetVideoOnOff@8=binkw32_orig._BinkSetVideoOnOff@8")
+#pragma comment(linker, "/EXPORT:_BinkSetVolume@12=binkw32_orig._BinkSetVolume@12")
+#pragma comment(linker, "/EXPORT:_BinkShouldSkip@4=binkw32_orig._BinkShouldSkip@4")
+#pragma comment(linker, "/EXPORT:_BinkStartAsyncThread@8=binkw32_orig._BinkStartAsyncThread@8")
+#pragma comment(linker, "/EXPORT:_BinkWait@4=binkw32_orig._BinkWait@4")
+#pragma comment(linker, "/EXPORT:_BinkWaitStopAsyncThread@4=binkw32_orig._BinkWaitStopAsyncThread@4")
+#pragma comment(linker, "/EXPORT:_RADSetMemory@8=binkw32_orig._RADSetMemory@8")
+#pragma comment(linker, "/EXPORT:_RADTimerRead@0=binkw32_orig._RADTimerRead@0")
 
 // ==============================================================================
 // Global Configuration & Runtime State
@@ -685,7 +743,7 @@ void InstallWindowedModeEnforcer()
 }
 
 // ==============================================================================
-// Multi-Version Offset Table (Steam 1.01, 1.01.1-b3 Non-Debug, 1.01.1-b3_debug)
+// Multi-Version Offset Table (Retail 1.00, Retail/Steam 1.01, 1.01.1-b3, Debug)
 // ==============================================================================
 struct GameOffsets {
     const char* versionLabel;
@@ -698,15 +756,33 @@ struct GameOffsets {
     DWORD getPlayerSector;
     DWORD packCoords;        // 0 if packed inline via bitshift
     DWORD speciesTable;      // 0 if validated natively by SpawnPeep
-    DWORD flagMpMode;
+    DWORD flagMpMode;        // 0 if single unified SpawnPeep is used
     DWORD playerPtr;
     DWORD buildSlongsList;
     DWORD buildFloatsList;
 };
 
-// Profile 0: Startopia Steam 1.01 (TimeDateStamp: 0x3B727110)
+// Profile 0: Startopia Retail 1.00 (TimeDateStamp: 0x3B1043EA)
+static const GameOffsets OFFSETS_RETAIL_1_00 = {
+    "Retail 1.00",
+    0x00000000, // deductEnergy (disabled)
+    0x0009EC90, // FUN_0049ec90
+    0x000FCB50, // FUN_004fcb50
+    0x000347B0, // FUN_004347b0
+    0x000347B0, // FUN_004347b0 (unified in 1.00)
+    0x00002C90, // FUN_00402c90
+    0x000D5890, // FUN_004d5890
+    0x00000000, // Packed inline via bitshift
+    0x00000000, // Validated natively inside SpawnPeep
+    0x00000000, // No separate MP spawner in 1.00
+    0x005A7C9C, // DAT_009a7c9c
+    0x003EB458, // DAT_007eb458
+    0x003EB454  // DAT_007eb454
+};
+
+// Profile 1: Startopia 1.01/1.01b (Retail/Steam/GOG) (TimeDateStamp: 0x3B727110)
 static const GameOffsets OFFSETS_STEAM_1_01 = {
-    "Steam/GOG 1.01 (0x3B727110)",
+    "1.01 / 1.01b (Retail/Steam/GOG)",
     0x00000000, // deductEnergy (disabled)
     0x000A0F60, // FUN_004a0f60
     0x00104940, // FUN_00504940
@@ -722,9 +798,9 @@ static const GameOffsets OFFSETS_STEAM_1_01 = {
     0x003F7D14  // DAT_007f7d14
 };
 
-// Profile 1: Startopia 1.01.1-b3 (Non-Debug)
+// Profile 2: Startopia 1.01.1-b3 (Non-Debug)
 static const GameOffsets OFFSETS_1_01_1_B3 = {
-    "1.01.1-b3 (Non-Debug)",
+    "1.01.1-b3",
     0x00000000, // deductEnergy (disabled)
     0x001AB390, // FUN_005ab390
     0x0029AEA0, // FUN_0069aea0
@@ -740,7 +816,7 @@ static const GameOffsets OFFSETS_1_01_1_B3 = {
     0x00676330  // DAT_00a76330
 };
 
-// Profile 2: Startopia 1.01.1-b3_debug
+// Profile 3: Startopia 1.01.1-b3_debug
 static const GameOffsets OFFSETS_1_01_1_B3_DEBUG = {
     "1.01.1-b3_debug",
     0x001AEA80, // FUN_005aea80
@@ -758,10 +834,25 @@ static const GameOffsets OFFSETS_1_01_1_B3_DEBUG = {
     0x00683880  // DAT_00a83880
 };
 
+// Profile 4: 1.02 Experimental Patch (startopia.exe_5.c)
+static const GameOffsets OFFSETS_1_02_EXP = {
+    "1.02 Experimental",
+    0x00676100, // playerPtr        (DAT_00a76100)
+    0x00676FA4, // flagMpMode       (DAT_00a76fa4)
+    0x0048C540, // buildSlongsList  (PTR_FUN_0088c540)
+    0x0048C588, // buildFloatsList  (PTR_FUN_0088c588)
+    0x00104A00, // scriptAddEnergy  (FUN_00504a00)
+    0x001A5850, // discoverTech     (FUN_005a5850)
+    0x0003EDF0, // spawnPeepSP      (FUN_0043edf0)
+    0x0003EC20, // spawnPeepMP      (FUN_0043ec20)
+    0x00006960, // spawnPortable    (FUN_00406960)
+    0x000FB130  // getPlayerSector  (FUN_004fb130)
+};
+
 GameOffsets g_offsets = OFFSETS_STEAM_1_01;
 
 // ==============================================================================
-// Runtime Version Detector (Selects Steam 1.01, 1.01.1-b3, or 1.01.1-b3_debug)
+// Runtime Version Detector (Retail 1.00, Retail/Steam 1.01, 1.01.1-b3, Debug)
 // ==============================================================================
 bool CheckBytesAtRVA(DWORD rva, const BYTE* expected, size_t len)
 {
@@ -787,25 +878,35 @@ void DetectGameVersion()
     }
 
     const BYTE sigSehPrologue[] = { 0x6A, 0xFF, 0x68 };
-    bool isB3NonDebug = CheckBytesAtRVA(OFFSETS_1_01_1_B3.scriptAddEnergy, sigSehPrologue, sizeof(sigSehPrologue));
-    bool isB3Debug = CheckBytesAtRVA(OFFSETS_1_01_1_B3_DEBUG.scriptAddEnergy, sigSehPrologue, sizeof(sigSehPrologue));
 
-    if (timeStamp == 0x3B727110 || (!isB3NonDebug && !isB3Debug)) {
+    // 1. Retail 1.00 (TimeStamp 0x3B1043EA or AddEnergy at 0x0009EC90)
+    if (timeStamp == 0x3B1043EA ||
+        CheckBytesAtRVA(OFFSETS_RETAIL_1_00.scriptAddEnergy, sigSehPrologue, sizeof(sigSehPrologue))) {
+        g_offsets = OFFSETS_RETAIL_1_00;
+    }
+    // 2. Retail 1.01 & Steam 1.01 (TimeStamp 0x3B727110 or AddEnergy at 0x000A0F60)
+    else if (timeStamp == 0x3B727110 ||
+        CheckBytesAtRVA(OFFSETS_STEAM_1_01.scriptAddEnergy, sigSehPrologue, sizeof(sigSehPrologue))) {
         g_offsets = OFFSETS_STEAM_1_01;
     }
-    else if (isB3NonDebug && !isB3Debug) {
-        g_offsets = OFFSETS_1_01_1_B3;
-    }
-    else if (isB3Debug && !isB3NonDebug) {
-        g_offsets = OFFSETS_1_01_1_B3_DEBUG;
-    }
     else {
-        const BYTE sigStdPrologue[] = { 0x55, 0x8B, 0xEC };
-        if (CheckBytesAtRVA(OFFSETS_1_01_1_B3.packCoords, sigStdPrologue, sizeof(sigStdPrologue))) {
+        // 3. 1.01.1-b3 (Non-Debug vs Debug) using SEH prologue + PackCoords prologue
+        const BYTE sigStdPrologue[] = { 0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0xFC };
+
+        bool isB3NonDebug = CheckBytesAtRVA(OFFSETS_1_01_1_B3.scriptAddEnergy, sigSehPrologue, sizeof(sigSehPrologue)) &&
+            CheckBytesAtRVA(OFFSETS_1_01_1_B3.packCoords, sigStdPrologue, sizeof(sigStdPrologue));
+
+        bool isB3Debug = CheckBytesAtRVA(OFFSETS_1_01_1_B3_DEBUG.scriptAddEnergy, sigSehPrologue, sizeof(sigSehPrologue)) &&
+            CheckBytesAtRVA(OFFSETS_1_01_1_B3_DEBUG.packCoords, sigStdPrologue, sizeof(sigStdPrologue));
+
+        if (isB3NonDebug && !isB3Debug) {
             g_offsets = OFFSETS_1_01_1_B3;
         }
-        else {
+        else if (isB3Debug && !isB3NonDebug) {
             g_offsets = OFFSETS_1_01_1_B3_DEBUG;
+        }
+        else {
+            g_offsets = OFFSETS_STEAM_1_01;
         }
     }
 
@@ -1278,8 +1379,6 @@ unsigned int GetSafePlayerTile(void* pPlayer, int localOffsetX, int localZ, int 
         PackCoords(&packedCoord, (char)finalX, (unsigned int)localZ, (unsigned int)deck);
     }
     else {
-        // Inline bitfield format used by Steam 1.01:
-        // ((deck & 3) << 5 | (z & 0x1F)) << 8 | (finalX & 0xFF)
         packedCoord = ((((unsigned int)deck & 3U) << 5 | ((unsigned int)localZ & 0x1FU)) << 8) |
             ((unsigned int)finalX & 0xFFU);
     }
@@ -1328,7 +1427,7 @@ void ExecuteSpawnPeep(const ModCommand& cmd, void* pPlayer)
         }
     }
 
-    int mpFlag = *(int*)(g_baseAddress + g_offsets.flagMpMode);
+    int mpFlag = (g_offsets.flagMpMode != 0) ? *(int*)(g_baseAddress + g_offsets.flagMpMode) : 0;
     unsigned int packedCoord = GetSafePlayerTile(pPlayer, cmd.localX, cmd.localZ, cmd.deck);
 
     PeepAttributesFull attr{};
@@ -2052,7 +2151,7 @@ LRESULT CALLBACK ClassicMenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         // --- TAB 4: Help/About ---
         char helpBuf[768];
         sprintf_s(helpBuf,
-            "Startopia Cheeseburger Menu v1.2.0 (Classic Win32 UI)\n"
+            "Startopia Cheeseburger Menu v1.4.0 (Classic Win32 UI)\n"
             "Build Date: 11/21/2026 | Game: %s\n"
             "Powered by Dear ImGui & MinHook\n"
             "Dedicated to Chris Nelson.\n\n"
@@ -2790,7 +2889,7 @@ void RenderImGuiMenuContents()
         // --- TAB 4: Help/About ---
         if (ImGui::BeginTabItem("Help/About")) {
             ImGui::Spacing();
-            ImGui::TextUnformatted("Startopia Cheeseburger Menu v1.2.0 (Dear ImGui DX11 Overlay)");
+            ImGui::TextUnformatted("Startopia Cheeseburger Menu v1.4.0 (Dear ImGui DX11 Overlay)");
             ImGui::TextDisabled("Build Date: 11/21/2026  |  Game: %s", g_offsets.versionLabel);
             ImGui::TextDisabled("Powered by Dear ImGui & MinHook  |  Dedicated to Chris Nelson.");
             ImGui::Separator();
@@ -2982,15 +3081,38 @@ DWORD WINAPI MainThread(LPVOID lpReserved)
     return 0;
 }
 
+// ==============================================================================
+// Guard Against Dual-Load on Stub Launchers (When a sibling .icd executable exists)
+// ==============================================================================
+bool IsStubLauncherProcess()
+{
+    char exePath[MAX_PATH]{};
+    if (GetModuleFileNameA(nullptr, exePath, MAX_PATH) == 0) return false;
+
+    size_t len = strlen(exePath);
+    if (len > 4 && _stricmp(exePath + len - 4, ".exe") == 0) {
+        char icdPath[MAX_PATH]{};
+        strncpy_s(icdPath, exePath, len - 4);
+        icdPath[len - 4] = '\0';
+        strcat_s(icdPath, ".icd");
+        if (GetFileAttributesA(icdPath) != INVALID_FILE_ATTRIBUTES) {
+            return true;
+        }
+    }
+    return false;
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
 {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        LoadOrCreateIniConfig();
-        if (g_config.forceWindowed) {
-            InstallWindowedModeEnforcer();
+        if (!IsStubLauncherProcess()) {
+            LoadOrCreateIniConfig();
+            if (g_config.forceWindowed) {
+                InstallWindowedModeEnforcer();
+            }
+            CreateThread(nullptr, 0, MainThread, hModule, 0, nullptr);
         }
-        CreateThread(nullptr, 0, MainThread, hModule, 0, nullptr);
     }
     return TRUE;
 }
