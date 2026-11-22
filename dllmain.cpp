@@ -2151,7 +2151,7 @@ LRESULT CALLBACK ClassicMenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         // --- TAB 4: Help/About ---
         char helpBuf[768];
         sprintf_s(helpBuf,
-            "Startopia Cheeseburger Menu v1.0 (Classic Win32 UI)\n"
+            "Startopia Cheeseburger Menu v1.4.0 (Classic Win32 UI)\n"
             "Build Date: 11/21/2026 | Game: %s\n"
             "Powered by Dear ImGui & MinHook\n"
             "Dedicated to Chris Nelson.\n\n"
@@ -2889,7 +2889,7 @@ void RenderImGuiMenuContents()
         // --- TAB 4: Help/About ---
         if (ImGui::BeginTabItem("Help/About")) {
             ImGui::Spacing();
-            ImGui::TextUnformatted("Startopia Cheeseburger Menu v1.0 (Dear ImGui DX11 Overlay)");
+            ImGui::TextUnformatted("Startopia Cheeseburger Menu v1.4.0 (Dear ImGui DX11 Overlay)");
             ImGui::TextDisabled("Build Date: 11/21/2026  |  Game: %s", g_offsets.versionLabel);
             ImGui::TextDisabled("Powered by Dear ImGui & MinHook  |  Dedicated to Chris Nelson.");
             ImGui::Separator();
